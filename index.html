@@ -236,7 +236,7 @@
         // 1️⃣ 先嘗試「多病人實驗室資料 + include subject/encounter」
         try {
           bundle = await client.request(
-            "Observation?category=laboratory&_count=200&_include=Observation:subject&_include=Observation:encounter",
+            "Observation?category=laboratory&_count=20&_include=Observation:subject&_include=Observation:encounter",
             { flat: false }
           );
           logDebug(bundle, "Observation Bundle（多病人模式）");
@@ -659,3 +659,4 @@
     </script>
   </body>
 </html>
+
