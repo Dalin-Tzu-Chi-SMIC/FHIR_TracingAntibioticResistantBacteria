@@ -101,6 +101,13 @@
         cursor: not-allowed;
       }
 
+      select {
+        padding: 0.25rem 0.4rem;
+        border-radius: 999px;
+        border: 1px solid #ccc;
+        font-size: 0.85rem;
+      }
+
       .error {
         color: #b00020;
         font-weight: 600;
@@ -144,13 +151,36 @@
       <!-- 傳播鏈圖 -->
       <section class="card">
         <h2>傳播鏈關係圖（病人 ↔ 共同接觸點）</h2>
+
         <div class="stats" id="graph-stats">尚未載入 FHIR 資料</div>
-        <div style="margin-bottom: 0.5rem;">
+
+        <div
+          style="
+            margin-bottom: 0.5rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            align-items: center;
+          "
+        >
+          <label for="sel-organism" style="font-size: 0.85rem;">選擇抗藥菌株：</label>
+          <select id="sel-organism">
+            <!-- ALL 給 demo server 用，未來在院內可預設成某一菌種 -->
+            <option value="ALL">全部菌種（不過濾）</option>
+            <option value="CRAB">Acinetobacter baumannii(CRAB)</option>
+            <option value="E_COLI_CR">E.coli (CR)</option>
+            <option value="VRE">Enterococcus faecium(VRE)</option>
+            <option value="KP_CR">Klebsiella pneumoniae (CR)</option>
+            <option value="CRPA">Pseudomonas aeruginosa(CRPA)</option>
+            <option value="MRSA">Staphylococcus aureus(MRSA)</option>
+          </select>
+
           <button id="btn-reload-graph">重新從 FHIR 重建傳播鏈圖</button>
-          <span style="font-size: 0.8rem; color: #555; margin-left: 0.4rem;">
-            建構邏輯：依 Observation 的「菌種 + Encounter 地點 + 日期」產生接觸點，再將共用接觸點的病人連成鏈。
+          <span style="font-size: 0.8rem; color: #555;">
+            邏輯：先依選定菌種篩選 Observation，再用「菌種 + Encounter 地點 + 日期」產生接觸點，將共用接觸點的病人連成鏈。（目前最多抓前 20 筆）
           </span>
         </div>
+
         <div id="cy"></div>
       </section>
 
@@ -163,6 +193,51 @@
     </main>
 
     <script>
+      /********** 抗藥菌株選項設定 **********/
+      const BACTERIA_OPTIONS = [
+        {
+          id: "ALL",
+          label: "全部菌種（不過濾）",
+          keywords: [],
+        },
+        {
+          id: "CRAB",
+          label: "Acinetobacter baumannii(CRAB)",
+          keywords: ["acinetobacter baumannii", "crab"],
+        },
+        {
+          id: "E_COLI_CR",
+          label: "E.coli (CR)",
+          keywords: ["e.coli", "escherichia coli", "cr e.coli"],
+        },
+        {
+          id: "VRE",
+          label: "Enterococcus faecium(VRE)",
+          keywords: ["enterococcus faecium", "vre"],
+        },
+        {
+          id: "KP_CR",
+          label: "Klebsiella pneumoniae (CR)",
+          keywords: ["klebsiella pneumoniae", "cr kp", "cr klebsiella"],
+        },
+        {
+          id: "CRPA",
+          label: "Pseudomonas aeruginosa(CRPA)",
+          keywords: ["pseudomonas aeruginosa", "crpa"],
+        },
+        {
+          id: "MRSA",
+          label: "Staphylococcus aureus(MRSA)",
+          keywords: ["staphylococcus aureus", "mrsa"],
+        },
+      ];
+
+      function getSelectedBacteriaOption() {
+        const sel = document.getElementById("sel-organism");
+        const val = sel.value || "ALL";
+        return BACTERIA_OPTIONS.find((x) => x.id === val) || BACTERIA_OPTIONS[0];
+      }
+
       /********** 小工具：Debug Log **********/
       function logDebug(obj, title) {
         const pre = document.getElementById("debug-log");
@@ -170,10 +245,7 @@
         let text = pre.textContent || "";
         text += `\n\n[${now}] ${title || "訊息"}\n`;
         try {
-          text +=
-            typeof obj === "string"
-              ? obj
-              : JSON.stringify(obj, null, 2);
+          text += typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
         } catch {
           text += String(obj);
         }
@@ -194,6 +266,74 @@
         const s = String(id);
         if (s.length <= 4) return s;
         return s.slice(0, 2) + "…" + s.slice(-2);
+      }
+
+      /********** 判斷：Observation 是否與「抗藥/感染」相關 **********/
+      function isAntibioticRelatedObservation(obs) {
+        if (!obs || !obs.code) return false;
+
+        const text = (obs.code.text || "").toLowerCase();
+        const codings = obs.code.coding || [];
+
+        const codeStrings = codings
+          .map(
+            (c) =>
+              `${c.system || ""}|${c.code || ""}|${c.display || ""}`.toLowerCase()
+          )
+          .join(" ");
+
+        // 1) 先用關鍵字粗略篩選 (可以改成你院內實際檢驗名稱/代碼)
+        const keywords = [
+          "culture", // blood culture, urine culture
+          "bacteria",
+          "bacteri",
+          "organism",
+          "antibiotic",
+          "susceptibil",
+          "resistan",
+          "mrsa",
+          "vre",
+          "esbl",
+          "carbapenem",
+          "acinetobacter",
+          "pseudomonas",
+          "klebsiella",
+        ];
+
+        const haystack = (text + " " + codeStrings).toLowerCase();
+        const hitKeyword = keywords.some((k) => haystack.includes(k));
+        if (!hitKeyword) return false;
+
+        // 2) interpretation / value 是否有 R (Resistant) 或文字 "Resistant"
+        const interpCodes = (obs.interpretation || [])
+          .flatMap((i) =>
+            (i.coding || []).map((c) => (c.code || "").toUpperCase())
+          );
+
+        const hasR = interpCodes.includes("R");
+
+        const interpText = (obs.interpretation || [])
+          .map((i) => (i.text || "").toLowerCase())
+          .join(" ");
+
+        const valueText = (
+          (obs.valueCodeableConcept && obs.valueCodeableConcept.text) ||
+          ""
+        ).toLowerCase();
+
+        const hasResistantWord =
+          interpText.includes("resistan") || valueText.includes("resistan");
+
+        // 至少要滿足「疑似微生物檢驗」+「疑似抗藥性」
+        return hasR || hasResistantWord;
+      }
+
+      /********** 判斷：Observation 是否符合下拉選到的菌種 **********/
+      function isObservationMatchBacteria(obs, organismText, bacteriaOption) {
+        if (!bacteriaOption || bacteriaOption.id === "ALL") return true;
+        const hay = (organismText || "").toLowerCase();
+        if (!hay) return false;
+        return bacteriaOption.keywords.some((k) => hay.includes(k));
       }
 
       /********** 畫 FHIR 連線資訊 **********/
@@ -225,7 +365,7 @@
       }
 
       /********** 從 FHIR 建立傳播鏈所需的資料結構 **********/
-      async function buildTransmissionData(client) {
+      async function buildTransmissionData(client, bacteriaOption) {
         const state = client.state || {};
         const currentPatientId =
           state.patientId || (client.patient && client.patient.id) || null;
@@ -233,15 +373,18 @@
         let bundle = null;
         let isSinglePatientMode = false;
 
-        // 1️⃣ 先嘗試「多病人實驗室資料 + include subject/encounter」
+        // 1️⃣ 嘗試多病人模式：Observation?category=laboratory&_count=20&include
         try {
           bundle = await client.request(
             "Observation?category=laboratory&_count=20&_include=Observation:subject&_include=Observation:encounter",
             { flat: false }
           );
-          logDebug(bundle, "Observation Bundle（多病人模式）");
+          logDebug(
+            bundle,
+            "Observation Bundle（多病人模式，_count=20, laboratory）"
+          );
         } catch (err) {
-          // 2️⃣ 若失敗，退而求其次：只針對當前病人
+          // 2️⃣ 多病人失敗 → 單病人模式
           logDebug(err, "多病人 Observation 查詢失敗，改用單一病人模式");
           if (!currentPatientId) {
             throw new Error(
@@ -252,10 +395,13 @@
           bundle = await client.request(
             `Observation?patient=${encodeURIComponent(
               currentPatientId
-            )}&category=laboratory&_count=200`,
+            )}&category=laboratory&_count=20`,
             { flat: false }
           );
-          logDebug(bundle, "Observation Bundle（單一病人模式）");
+          logDebug(
+            bundle,
+            "Observation Bundle（單一病人模式，_count=20, laboratory）"
+          );
         }
 
         const entries = bundle.entry || [];
@@ -263,7 +409,7 @@
         const encountersById = {}; // id -> Encounter resource
         const observations = [];
 
-        // 先把 Bundle 裡 include 回來的 Patient / Encounter 收集起來
+        // 收集 Observation / Patient / Encounter
         for (const e of entries) {
           const res = e.resource;
           if (!res || !res.resourceType) continue;
@@ -276,7 +422,7 @@
           }
         }
 
-        // 若是單一病人模式，Bundle 可能沒有 Patient，要手動讀一次
+        // 單病人模式補抓 Patient
         if (isSinglePatientMode && currentPatientId && !patientsById[currentPatientId]) {
           try {
             const p = await client.request(`Patient/${currentPatientId}`);
@@ -287,15 +433,18 @@
           }
         }
 
-        // 建構「病例 Case」概念：Observation + Patient + Encounter
-        const cases = []; // 每一個 case 對應到一次實驗室檢驗事件
+        const cases = []; // 每一個 case 對應一個「抗藥菌事件」
 
         for (const obs of observations) {
+          // 先判斷這是不是「抗藥/感染相關」的 Observation
+          if (!isAntibioticRelatedObservation(obs)) {
+            continue;
+          }
+
           const subjRef = obs.subject && obs.subject.reference;
           if (!subjRef || !subjRef.startsWith("Patient/")) continue;
           const patientId = subjRef.split("/")[1];
 
-          // 單一病人模式下，可能需要過濾
           if (isSinglePatientMode && currentPatientId && patientId !== currentPatientId) {
             continue;
           }
@@ -310,7 +459,6 @@
             enc = encountersById[encId];
           }
           if (enc) {
-            // 試著從 location / serviceProvider 拿地點名稱
             wardName =
               (enc.location &&
                 enc.location[0] &&
@@ -320,11 +468,22 @@
               "";
           }
 
-          // 菌名：從 Observation.code 拿
+          // 菌名：從 Observation.code 的 text / display / code 組一個字串
           const code = obs.code || {};
-          const coding = (code.coding && code.coding[0]) || {};
+          const coding0 = (code.coding && code.coding[0]) || {};
+          const organismTextSource =
+            (code.text || "") +
+            " " +
+            (coding0.display || "") +
+            " " +
+            (coding0.code || "");
           const organism =
-            code.text || coding.display || coding.code || "未標註菌名";
+            code.text || coding0.display || coding0.code || "未標註菌名";
+
+          // 再用「下拉選到的菌種」做一次篩選
+          if (!isObservationMatchBacteria(obs, organismTextSource, bacteriaOption)) {
+            continue;
+          }
 
           // 檢驗時間
           const effective =
@@ -350,8 +509,9 @@
           {
             caseCount: cases.length,
             patientCount: Object.keys(patientsById).length,
+            bacteria: bacteriaOption.label,
           },
-          "初步病例 Case 數統計"
+          "初步病例 Case 數統計（依菌株過濾後）"
         );
 
         return { cases, patientsById, isSinglePatientMode };
@@ -359,18 +519,16 @@
 
       /********** 從 cases 組出「病人節點 + 接觸點節點 + 邊」 **********/
       function buildGraphElementsFromCases(cases, patientsById) {
-        // 病人節點
-        const patientNodeMap = {}; // patientId -> { id, label }
-        // 接觸點節點（地點 + 菌名 + 日期）
-        const contactNodeMap = {}; // contactKey -> { id, label }
-        // P-C 邊
+        const patientNodeMap = {}; // patientId -> node
+        const contactNodeMap = {}; // contactKey -> node
         const pcEdges = [];
-        // P-P 邊（由共用接觸點推導）
-        const ppEdgeSet = new Set(); // "p1|p2" 避免重複
+        const ppEdgeSet = new Set();
+        const contactToPatients = {};
 
         for (const c of cases) {
           const pId = c.patientId;
-          // 建病人節點
+
+          // 病人節點
           if (!patientNodeMap[pId]) {
             const p = patientsById[pId];
             let displayName = "";
@@ -383,14 +541,15 @@
               displayName = full || "";
             }
 
-            const masked = maskName(displayName) || shortId(pId) || "未知病人";
+            const masked =
+              maskName(displayName) || shortId(pId) || "未知病人";
             patientNodeMap[pId] = {
               id: "p-" + pId,
               label: masked,
             };
           }
 
-          // 建接觸點節點 key
+          // 接觸點：病房 + 菌名 + 日期
           const contactKey = `${c.wardName}|${c.organism}|${c.dateKey}`;
           if (!contactNodeMap[contactKey]) {
             const nodeId =
@@ -407,17 +566,14 @@
             patientId: pId,
             contactKey,
           });
-        }
 
-        // 依接觸點把病例 group 起來，推導 P-P 邊
-        const contactToPatients = {}; // contactKey -> Set<patientId>
-        for (const e of pcEdges) {
-          if (!contactToPatients[e.contactKey]) {
-            contactToPatients[e.contactKey] = new Set();
+          if (!contactToPatients[contactKey]) {
+            contactToPatients[contactKey] = new Set();
           }
-          contactToPatients[e.contactKey].add(e.patientId);
+          contactToPatients[contactKey].add(pId);
         }
 
+        // P-P 邊：共享接觸點的病人兩兩相連
         const ppEdges = [];
         for (const [contactKey, set] of Object.entries(contactToPatients)) {
           const arr = Array.from(set);
@@ -439,7 +595,6 @@
           }
         }
 
-        // 組成 Cytoscape elements
         const elements = [];
 
         // 病人節點
@@ -515,14 +670,14 @@
                 "background-color": "#f28b82",
                 "border-color": "#042433",
                 "border-width": 2,
-                "label": "data(label)",
+                label: "data(label)",
                 "text-valign": "center",
                 "text-halign": "center",
                 "text-wrap": "wrap",
                 "font-size": 10,
-                "shape": "ellipse",
-                "width": 40,
-                "height": 40,
+                shape: "ellipse",
+                width: 40,
+                height: 40,
               },
             },
             {
@@ -531,13 +686,13 @@
                 "background-color": "#aecbfa",
                 "border-color": "#042433",
                 "border-width": 1,
-                "label": "data(label)",
+                label: "data(label)",
                 "text-valign": "center",
                 "text-halign": "center",
                 "text-wrap": "wrap",
                 "font-size": 9,
-                "shape": "round-rectangle",
-                "padding": "4px",
+                shape: "round-rectangle",
+                padding: "4px",
               },
             },
             {
@@ -546,7 +701,7 @@
                 "line-style": "dotted",
                 "line-color": "#7a7a7a",
                 "target-arrow-shape": "none",
-                "width": 1,
+                width: 1,
               },
             },
             {
@@ -557,7 +712,7 @@
                 "target-arrow-shape": "triangle",
                 "target-arrow-color": "#7a7a7a",
                 "curve-style": "straight",
-                "width": 2,
+                width: 2,
               },
             },
             {
@@ -569,6 +724,12 @@
                 "target-arrow-color": "#ffab00",
               },
             },
+            {
+              selector: ".dim",
+              style: {
+                opacity: 0.2,
+              },
+            },
           ],
           layout: {
             name: "cose",
@@ -576,7 +737,7 @@
           },
         });
 
-        // 點病人節點時，highlight 相關節點
+        // 點病人節點時 highlight 相關
         cy.on("tap", "node[type = 'patient']", (evt) => {
           const node = evt.target;
           cy.elements().removeClass("dim");
@@ -590,8 +751,6 @@
             cy.elements().removeClass("dim");
           }
         });
-
-        cy.style().selector(".dim").style("opacity", 0.2).update();
       }
 
       /********** 初始化整個 App **********/
@@ -603,16 +762,24 @@
 
           const reloadBtn = document.getElementById("btn-reload-graph");
           const clearBtn = document.getElementById("btn-clear-debug");
+          const selOrganism = document.getElementById("sel-organism");
 
           async function reloadGraph() {
+            const opt = getSelectedBacteriaOption();
             reloadBtn.disabled = true;
             document.getElementById("graph-stats").textContent =
-              "從 FHIR 讀取資料並重建傳播鏈中...";
+              `從 FHIR 讀取資料並重建傳播鏈中...（最多 20 筆 Observation，菌種：${opt.label}）`;
 
             try {
-              const { cases, patientsById } = await buildTransmissionData(client);
+              const { cases, patientsById } = await buildTransmissionData(
+                client,
+                opt
+              );
               if (!cases.length) {
-                renderGraph([], "查無符合條件的實驗室 Observation，無法建立傳播鏈。");
+                renderGraph(
+                  [],
+                  `查無符合條件的抗藥菌 Observation（菌種：${opt.label}），無法建立傳播鏈。`
+                );
                 reloadBtn.disabled = false;
                 return;
               }
@@ -625,7 +792,7 @@
                 ppCount,
               } = buildGraphElementsFromCases(cases, patientsById);
 
-              const statsText = `節點：病人 ${patientCount} 人、接觸點 ${contactCount} 個；邊：病人-接觸點 ${pcCount} 條、病人-病人 ${ppCount} 條。`;
+              const statsText = `節點：病人 ${patientCount} 人、接觸點 ${contactCount} 個；邊：病人-接觸點 ${pcCount} 條、病人-病人 ${ppCount} 條。（菌種：${opt.label}，基於最多 20 筆 Observation）`;
               renderGraph(elements, statsText);
             } catch (err) {
               console.error(err);
@@ -641,12 +808,13 @@
           // 初次載入
           await reloadGraph();
 
-          // 綁定按鈕
+          // 綁定事件
           reloadBtn.addEventListener("click", reloadGraph);
           clearBtn.addEventListener("click", () => {
             document.getElementById("debug-log").textContent =
               "// 已清除訊息，可重新操作。";
           });
+          selOrganism.addEventListener("change", reloadGraph);
         })
         .catch((err) => {
           console.error("SMART 初始化失敗", err);
@@ -659,4 +827,3 @@
     </script>
   </body>
 </html>
-
