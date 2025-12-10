@@ -2,21 +2,51 @@
 <html lang="zh-Hant">
   <head>
     <meta charset="UTF-8" />
-    <title>Launch 疫調系統 SMART App</title>
+    <title>Launch 疫調傳播鏈 SMART App</title>
 
+    <!-- SMART on FHIR JS -->
     <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
   </head>
   <body>
+    <p>正在從 EHR / 沙盒取得啟動參數並導向至 SMART App...</p>
+
     <script>
+      // 讀取 URL QueryString 參數的小工具
+      function getUrlParam(name) {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get(name);
+      }
+
+      // ✅ 這些是你註冊在 Sandbox / 衛福部那邊的 Client 設定
       const CLIENT_ID = "my_web_app";
       const SCOPE = "launch openid fhirUser patient/*.read";
-      const REDIRECT_URI = "index.html";
+      const REDIRECT_URI =
+        "https://dalin-tzu-chi-smic.github.io/FHIR_TracingAntibioticResistantBacteria/index.html";
+      // 如果你是本機測試就改成 http://localhost:xxxx/index.html
 
-      FHIR.oauth2.authorize({
-        clientId: CLIENT_ID,
-        scope: SCOPE,
-        redirectUri: REDIRECT_URI,
-      });
+      // ✅ 從 EHR / Sandbox 傳進來的 iss / launch
+      const iss = getUrlParam("iss");
+      const launch = getUrlParam("launch");
+
+      console.log("[launch.html] iss =", iss);
+      console.log("[launch.html] launch =", launch);
+
+      if (!iss) {
+        // 沒拿到 iss，通常代表不是從 Launcher 啟動
+        document.body.innerHTML =
+          "<h3 style='color:red'>找不到 iss 參數。請確認是從沙盒 / EHR Launcher 啟動此 App，而不是直接打開 launch.html。</h3>";
+      } else {
+        // ⭐ 關鍵：把 iss / launch 一起丟給 fhirclient，確保每次都是「新的那次啟動」
+        FHIR.oauth2.authorize({
+          clientId: CLIENT_ID,
+          scope: SCOPE,
+          redirectUri: REDIRECT_URI,
+          iss: iss,
+          launch: launch,
+          // 建議加上，所有流程都在同一視窗完成，比較不會被 popup 擋下來
+          completeInTarget: true
+        });
+      }
     </script>
   </body>
 </html>
