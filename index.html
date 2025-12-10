@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <title>疫調傳播鏈 SMART App (FHIR Sandbox)</title>
+
+    <!-- SMART on FHIR JS 客戶端 -->
+    <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+
+    <!-- Cytoscape.js：用來畫關係圖 -->
+    <script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
+
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei",
+          sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #f5f5f7;
+      }
+
+      header {
+        background: #003366;
+        color: #fff;
+        padding: 1rem 1.5rem;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 1.4rem;
+      }
+
+      header small {
+        display: block;
+        font-size: 0.8rem;
+        opacity: 0.8;
+      }
+
+      main {
+        padding: 1rem 1.5rem 2rem 1.5rem;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .card {
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+        padding: 1rem 1.2rem;
+        margin-bottom: 1rem;
+      }
+
+      .card h2 {
+        margin-top: 0;
+        font-size: 1.1rem;
+        border-bottom: 1px solid #e0e0e0;
+        padding-bottom: 0.3rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem 2rem;
+        font-size: 0.9rem;
+      }
+
+      .meta-label {
+        font-weight: 600;
+      }
+
+      #cy {
+        width: 100%;
+        height: 500px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+      }
+
+      .stats {
+        font-size: 0.85rem;
+        color: #555;
+        margin-bottom: 0.5rem;
+      }
+
+      button {
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        border: none;
+        background: #003366;
+        color: #fff;
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+
+      button:hover {
+        background: #004a99;
+      }
+
+      button:disabled {
+        background: #9e9e9e;
+        cursor: not-allowed;
+      }
+
+      .error {
+        color: #b00020;
+        font-weight: 600;
+      }
+
+      pre {
+        background: #111827;
+        color: #e5e7eb;
+        padding: 0.7rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        overflow: auto;
+        max-height: 260px;
+      }
+
+      @media (max-width: 768px) {
+        main {
+          padding: 0.8rem;
+        }
+        #cy {
+          height: 420px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>疫調傳播鏈 SMART App</h1>
+      <small>從 FHIR(Observation / Encounter) 組出傳播鏈關係圖</small>
+    </header>
+
+    <main>
+      <!-- FHIR 連線資訊 -->
+      <section class="card">
+        <h2>FHIR 連線資訊</h2>
+        <div id="meta-content" class="meta-row">
+          <span>初始化中...</span>
+        </div>
+      </section>
+
+      <!-- 傳播鏈圖 -->
+      <section class="card">
+        <h2>傳播鏈關係圖（病人 ↔ 共同接觸點）</h2>
+        <div class="stats" id="graph-stats">尚未載入 FHIR 資料</div>
+        <div style="margin-bottom: 0.5rem;">
+          <button id="btn-reload-graph">重新從 FHIR 重建傳播鏈圖</button>
+          <span style="font-size: 0.8rem; color: #555; margin-left: 0.4rem;">
+            建構邏輯：依 Observation 的「菌種 + Encounter 地點 + 日期」產生接觸點，再將共用接觸點的病人連成鏈。
+          </span>
+        </div>
+        <div id="cy"></div>
+      </section>
+
+      <!-- 除錯 / JSON -->
+      <section class="card">
+        <h2>除錯訊息 / 原始 JSON</h2>
+        <button id="btn-clear-debug">清除訊息</button>
+        <pre id="debug-log">// 這裡會顯示 client 狀態、錯誤訊息與部分原始 JSON</pre>
+      </section>
+    </main>
+
+    <script>
+      /********** 小工具：Debug Log **********/
+      function logDebug(obj, title) {
+        const pre = document.getElementById("debug-log");
+        const now = new Date().toISOString();
+        let text = pre.textContent || "";
+        text += `\n\n[${now}] ${title || "訊息"}\n`;
+        try {
+          text +=
+            typeof obj === "string"
+              ? obj
+              : JSON.stringify(obj, null, 2);
+        } catch {
+          text += String(obj);
+        }
+        pre.textContent = text;
+      }
+
+      /********** 小工具：Mask 病人名稱 / ID **********/
+      function maskName(name) {
+        if (!name) return "";
+        const s = name.trim();
+        if (s.length === 1) return s + "○";
+        if (s.length === 2) return s[0] + "○";
+        return s[0] + "○" + s.slice(2);
+      }
+
+      function shortId(id) {
+        if (!id) return "";
+        const s = String(id);
+        if (s.length <= 4) return s;
+        return s.slice(0, 2) + "…" + s.slice(-2);
+      }
+
+      /********** 畫 FHIR 連線資訊 **********/
+      function renderMeta(client) {
+        const div = document.getElementById("meta-content");
+        const st = client.state || {};
+        const url = st.serverUrl || "(未知)";
+        const token = st.tokenResponse || {};
+        const patientId = st.patientId || (client.patient && client.patient.id);
+
+        div.innerHTML = `
+          <div>
+            <span class="meta-label">FHIR Server：</span>
+            <span>${url}</span>
+          </div>
+          <div>
+            <span class="meta-label">Access Token：</span>
+            <span>${token.access_token ? "已取得" : "尚未取得 / 不需 token"}</span>
+          </div>
+          <div>
+            <span class="meta-label">Patient Id (context)：</span>
+            <span>${patientId || "(無病人 context 或為 system/user app)"}</span>
+          </div>
+          <div>
+            <span class="meta-label">Scope：</span>
+            <span>${st.tokenResponse?.scope || "(未知)"}</span>
+          </div>
+        `;
+      }
+
+      /********** 從 FHIR 建立傳播鏈所需的資料結構 **********/
+      async function buildTransmissionData(client) {
+        const state = client.state || {};
+        const currentPatientId =
+          state.patientId || (client.patient && client.patient.id) || null;
+
+        let bundle = null;
+        let isSinglePatientMode = false;
+
+        // 1️⃣ 先嘗試「多病人實驗室資料 + include subject/encounter」
+        try {
+          bundle = await client.request(
+            "Observation?category=laboratory&_count=200&_include=Observation:subject&_include=Observation:encounter",
+            { flat: false }
+          );
+          logDebug(bundle, "Observation Bundle（多病人模式）");
+        } catch (err) {
+          // 2️⃣ 若失敗，退而求其次：只針對當前病人
+          logDebug(err, "多病人 Observation 查詢失敗，改用單一病人模式");
+          if (!currentPatientId) {
+            throw new Error(
+              "無法取得多病人 Observation，且沒有病人 context，無法繼續建立傳播鏈。"
+            );
+          }
+          isSinglePatientMode = true;
+          bundle = await client.request(
+            `Observation?patient=${encodeURIComponent(
+              currentPatientId
+            )}&category=laboratory&_count=200`,
+            { flat: false }
+          );
+          logDebug(bundle, "Observation Bundle（單一病人模式）");
+        }
+
+        const entries = bundle.entry || [];
+        const patientsById = {}; // id -> Patient resource
+        const encountersById = {}; // id -> Encounter resource
+        const observations = [];
+
+        // 先把 Bundle 裡 include 回來的 Patient / Encounter 收集起來
+        for (const e of entries) {
+          const res = e.resource;
+          if (!res || !res.resourceType) continue;
+          if (res.resourceType === "Observation") {
+            observations.push(res);
+          } else if (res.resourceType === "Patient") {
+            patientsById[res.id] = res;
+          } else if (res.resourceType === "Encounter") {
+            encountersById[res.id] = res;
+          }
+        }
+
+        // 若是單一病人模式，Bundle 可能沒有 Patient，要手動讀一次
+        if (isSinglePatientMode && currentPatientId && !patientsById[currentPatientId]) {
+          try {
+            const p = await client.request(`Patient/${currentPatientId}`);
+            patientsById[p.id] = p;
+            logDebug(p, "補抓 Patient（單一病人模式）");
+          } catch (err) {
+            logDebug(err, "補抓 Patient 失敗");
+          }
+        }
+
+        // 建構「病例 Case」概念：Observation + Patient + Encounter
+        const cases = []; // 每一個 case 對應到一次實驗室檢驗事件
+
+        for (const obs of observations) {
+          const subjRef = obs.subject && obs.subject.reference;
+          if (!subjRef || !subjRef.startsWith("Patient/")) continue;
+          const patientId = subjRef.split("/")[1];
+
+          // 單一病人模式下，可能需要過濾
+          if (isSinglePatientMode && currentPatientId && patientId !== currentPatientId) {
+            continue;
+          }
+
+          const patientRes = patientsById[patientId];
+
+          const encRef = obs.encounter && obs.encounter.reference;
+          let enc = null;
+          let wardName = "";
+          if (encRef && encRef.startsWith("Encounter/")) {
+            const encId = encRef.split("/")[1];
+            enc = encountersById[encId];
+          }
+          if (enc) {
+            // 試著從 location / serviceProvider 拿地點名稱
+            wardName =
+              (enc.location &&
+                enc.location[0] &&
+                enc.location[0].location &&
+                enc.location[0].location.display) ||
+              (enc.serviceProvider && enc.serviceProvider.display) ||
+              "";
+          }
+
+          // 菌名：從 Observation.code 拿
+          const code = obs.code || {};
+          const coding = (code.coding && code.coding[0]) || {};
+          const organism =
+            code.text || coding.display || coding.code || "未標註菌名";
+
+          // 檢驗時間
+          const effective =
+            obs.effectiveDateTime ||
+            (obs.effectivePeriod && obs.effectivePeriod.start) ||
+            obs.issued ||
+            "";
+          const dateKey = effective ? String(effective).slice(0, 10) : "未知日期";
+          const locKey = wardName || "未知地點";
+
+          cases.push({
+            obsId: obs.id,
+            patientId,
+            patientRes,
+            encounter: enc,
+            wardName: locKey,
+            organism,
+            dateKey,
+          });
+        }
+
+        logDebug(
+          {
+            caseCount: cases.length,
+            patientCount: Object.keys(patientsById).length,
+          },
+          "初步病例 Case 數統計"
+        );
+
+        return { cases, patientsById, isSinglePatientMode };
+      }
+
+      /********** 從 cases 組出「病人節點 + 接觸點節點 + 邊」 **********/
+      function buildGraphElementsFromCases(cases, patientsById) {
+        // 病人節點
+        const patientNodeMap = {}; // patientId -> { id, label }
+        // 接觸點節點（地點 + 菌名 + 日期）
+        const contactNodeMap = {}; // contactKey -> { id, label }
+        // P-C 邊
+        const pcEdges = [];
+        // P-P 邊（由共用接觸點推導）
+        const ppEdgeSet = new Set(); // "p1|p2" 避免重複
+
+        for (const c of cases) {
+          const pId = c.patientId;
+          // 建病人節點
+          if (!patientNodeMap[pId]) {
+            const p = patientsById[pId];
+            let displayName = "";
+
+            if (p && p.name && p.name[0]) {
+              const n = p.name[0];
+              const full =
+                n.text ||
+                `${n.family || ""}${(n.given || []).join("")}`.trim();
+              displayName = full || "";
+            }
+
+            const masked = maskName(displayName) || shortId(pId) || "未知病人";
+            patientNodeMap[pId] = {
+              id: "p-" + pId,
+              label: masked,
+            };
+          }
+
+          // 建接觸點節點 key
+          const contactKey = `${c.wardName}|${c.organism}|${c.dateKey}`;
+          if (!contactNodeMap[contactKey]) {
+            const nodeId =
+              "c-" +
+              btoa(unescape(encodeURIComponent(contactKey))).replace(/=/g, "");
+            const label = `${c.wardName}\n${c.organism}\n${c.dateKey}`;
+            contactNodeMap[contactKey] = {
+              id: nodeId,
+              label,
+            };
+          }
+
+          pcEdges.push({
+            patientId: pId,
+            contactKey,
+          });
+        }
+
+        // 依接觸點把病例 group 起來，推導 P-P 邊
+        const contactToPatients = {}; // contactKey -> Set<patientId>
+        for (const e of pcEdges) {
+          if (!contactToPatients[e.contactKey]) {
+            contactToPatients[e.contactKey] = new Set();
+          }
+          contactToPatients[e.contactKey].add(e.patientId);
+        }
+
+        const ppEdges = [];
+        for (const [contactKey, set] of Object.entries(contactToPatients)) {
+          const arr = Array.from(set);
+          for (let i = 0; i < arr.length; i++) {
+            for (let j = i + 1; j < arr.length; j++) {
+              const a = arr[i];
+              const b = arr[j];
+              if (a === b) continue;
+              const pid1 = a < b ? a : b;
+              const pid2 = a < b ? b : a;
+              const key = pid1 + "|" + pid2;
+              if (ppEdgeSet.has(key)) continue;
+              ppEdgeSet.add(key);
+              ppEdges.push({
+                from: "p-" + pid1,
+                to: "p-" + pid2,
+              });
+            }
+          }
+        }
+
+        // 組成 Cytoscape elements
+        const elements = [];
+
+        // 病人節點
+        Object.values(patientNodeMap).forEach((p) => {
+          elements.push({
+            data: {
+              id: p.id,
+              label: p.label,
+              type: "patient",
+            },
+          });
+        });
+
+        // 接觸點節點
+        Object.values(contactNodeMap).forEach((c) => {
+          elements.push({
+            data: {
+              id: c.id,
+              label: c.label,
+              type: "contact",
+            },
+          });
+        });
+
+        // P-C 邊
+        pcEdges.forEach((e, idx) => {
+          const pNode = patientNodeMap[e.patientId];
+          const cNode = contactNodeMap[e.contactKey];
+          if (!pNode || !cNode) return;
+          elements.push({
+            data: {
+              id: "pc-" + idx,
+              source: pNode.id,
+              target: cNode.id,
+              type: "pc",
+            },
+          });
+        });
+
+        // P-P 邊
+        ppEdges.forEach((e, idx) => {
+          elements.push({
+            data: {
+              id: "pp-" + idx,
+              source: e.from,
+              target: e.to,
+              type: "pp",
+            },
+          });
+        });
+
+        return {
+          elements,
+          patientCount: Object.keys(patientNodeMap).length,
+          contactCount: Object.keys(contactNodeMap).length,
+          pcCount: pcEdges.length,
+          ppCount: ppEdges.length,
+        };
+      }
+
+      /********** 用 Cytoscape 畫圖 **********/
+      function renderGraph(elements, statsText) {
+        const statsDiv = document.getElementById("graph-stats");
+        statsDiv.textContent = statsText;
+
+        const cy = cytoscape({
+          container: document.getElementById("cy"),
+          elements: elements,
+          style: [
+            {
+              selector: "node[type = 'patient']",
+              style: {
+                "background-color": "#f28b82",
+                "border-color": "#042433",
+                "border-width": 2,
+                "label": "data(label)",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-wrap": "wrap",
+                "font-size": 10,
+                "shape": "ellipse",
+                "width": 40,
+                "height": 40,
+              },
+            },
+            {
+              selector: "node[type = 'contact']",
+              style: {
+                "background-color": "#aecbfa",
+                "border-color": "#042433",
+                "border-width": 1,
+                "label": "data(label)",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-wrap": "wrap",
+                "font-size": 9,
+                "shape": "round-rectangle",
+                "padding": "4px",
+              },
+            },
+            {
+              selector: "edge[type = 'pc']",
+              style: {
+                "line-style": "dotted",
+                "line-color": "#7a7a7a",
+                "target-arrow-shape": "none",
+                "width": 1,
+              },
+            },
+            {
+              selector: "edge[type = 'pp']",
+              style: {
+                "line-style": "solid",
+                "line-color": "#7a7a7a",
+                "target-arrow-shape": "triangle",
+                "target-arrow-color": "#7a7a7a",
+                "curve-style": "straight",
+                "width": 2,
+              },
+            },
+            {
+              selector: ":selected",
+              style: {
+                "border-width": 3,
+                "border-color": "#ffab00",
+                "line-color": "#ffab00",
+                "target-arrow-color": "#ffab00",
+              },
+            },
+          ],
+          layout: {
+            name: "cose",
+            animate: false,
+          },
+        });
+
+        // 點病人節點時，highlight 相關節點
+        cy.on("tap", "node[type = 'patient']", (evt) => {
+          const node = evt.target;
+          cy.elements().removeClass("dim");
+          const neighborhood = node.closedNeighborhood();
+          cy.elements().difference(neighborhood).addClass("dim");
+        });
+
+        // 點空白還原
+        cy.on("tap", (evt) => {
+          if (evt.target === cy) {
+            cy.elements().removeClass("dim");
+          }
+        });
+
+        cy.style().selector(".dim").style("opacity", 0.2).update();
+      }
+
+      /********** 初始化整個 App **********/
+      FHIR.oauth2
+        .ready()
+        .then(async (client) => {
+          logDebug(client.state, "SMART client.state");
+          renderMeta(client);
+
+          const reloadBtn = document.getElementById("btn-reload-graph");
+          const clearBtn = document.getElementById("btn-clear-debug");
+
+          async function reloadGraph() {
+            reloadBtn.disabled = true;
+            document.getElementById("graph-stats").textContent =
+              "從 FHIR 讀取資料並重建傳播鏈中...";
+
+            try {
+              const { cases, patientsById } = await buildTransmissionData(client);
+              if (!cases.length) {
+                renderGraph([], "查無符合條件的實驗室 Observation，無法建立傳播鏈。");
+                reloadBtn.disabled = false;
+                return;
+              }
+
+              const {
+                elements,
+                patientCount,
+                contactCount,
+                pcCount,
+                ppCount,
+              } = buildGraphElementsFromCases(cases, patientsById);
+
+              const statsText = `節點：病人 ${patientCount} 人、接觸點 ${contactCount} 個；邊：病人-接觸點 ${pcCount} 條、病人-病人 ${ppCount} 條。`;
+              renderGraph(elements, statsText);
+            } catch (err) {
+              console.error(err);
+              logDebug(err, "建立傳播鏈失敗");
+              document.getElementById("graph-stats").innerHTML =
+                '<span class="error">無法從 FHIR 建立傳播鏈，請查看下方 Debug 訊息。</span>';
+              renderGraph([], "建立傳播鏈失敗。");
+            } finally {
+              reloadBtn.disabled = false;
+            }
+          }
+
+          // 初次載入
+          await reloadGraph();
+
+          // 綁定按鈕
+          reloadBtn.addEventListener("click", reloadGraph);
+          clearBtn.addEventListener("click", () => {
+            document.getElementById("debug-log").textContent =
+              "// 已清除訊息，可重新操作。";
+          });
+        })
+        .catch((err) => {
+          console.error("SMART 初始化失敗", err);
+          logDebug(err, "SMART 初始化失敗");
+          document.getElementById("meta-content").innerHTML =
+            '<span class="error">SMART 初始化失敗，請確認 launch.html 設定與沙盒環境。</span>';
+          document.getElementById("graph-stats").textContent =
+            "無法載入 FHIR 資料。";
+        });
+    </script>
+  </body>
+</html>

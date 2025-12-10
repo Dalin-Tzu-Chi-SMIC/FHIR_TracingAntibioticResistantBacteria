@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Launch 疫調系統 SMART App</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+  </head>
+  <body>
+    <script>
+      const CLIENT_ID = "my_web_app";
+      const SCOPE = "launch openid fhirUser patient/*.read";
+      const REDIRECT_URI = "index.html";
+
+      FHIR.oauth2.authorize({
+        clientId: CLIENT_ID,
+        scope: SCOPE,
+        redirectUri: REDIRECT_URI,
+      });
+    </script>
+  </body>
+</html>
