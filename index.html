@@ -103,7 +103,7 @@
 
       select,
       input[type="text"] {
-        padding: 0.25rem 0.4rem;
+        padding: 0.25rem 0.5rem;
         border-radius: 999px;
         border: 1px solid #ccc;
         font-size: 0.85rem;
@@ -155,6 +155,7 @@
 
         <div class="stats" id="graph-stats">尚未載入 FHIR 資料</div>
 
+        <!-- 上方操作區：菌種選擇 + 起始病人ID -->
         <div
           style="
             margin-bottom: 0.5rem;
@@ -175,12 +176,22 @@
             <option value="MRSA">Staphylococcus aureus(MRSA)</option>
           </select>
 
-          <button id="btn-reload-graph">重新從 FHIR 重建傳播鏈圖</button>
+          <span style="font-size: 0.85rem; margin-left: 0.5rem;">起始病人 ID：</span>
+          <input
+            type="text"
+            id="txt-root-patient"
+            placeholder="例如：130206"
+            style="min-width: 110px;"
+          />
+          <button id="btn-apply-root">以此病人為起點重建</button>
+
+          <button id="btn-reload-graph">重新從 FHIR 重建（不指定起點）</button>
         </div>
 
         <div style="font-size: 0.8rem; color: #555; margin-bottom: 0.5rem;">
           邏輯：從多位病人的實驗室 Observation 中找出抗藥菌事件，依「病房 + 菌種 + 日期」判定
-          共同接觸點，<b>只畫「人 ↔ 人」的傳播線</b>（病人節點），不畫菌種節點。
+          共同接觸點，只畫<b>人 ↔ 人</b>的傳播線。<br />
+          若輸入起始病人 ID，則只顯示與該病人「在同一條傳播鏈上」的病人群組，並將其標為 No.1。
         </div>
 
         <div id="cy"></div>
@@ -363,7 +374,6 @@
 
       /********** 從 FHIR 建立傳播鏈所需的資料結構（多病人） **********/
       async function buildTransmissionData(client, bacteriaOption) {
-        // 多病人模式：查所有實驗室 Observation，連同 subject + encounter + location
         const url =
           "Observation?category=laboratory&_count=50" +
           "&_include=Observation:subject" +
@@ -435,7 +445,7 @@
             }
           }
 
-          // 菌名：從 Observation.code 的 text / display / code
+          // 菌名
           const code = obs.code || {};
           const coding0 = (code.coding && code.coding[0]) || {};
           const organismTextSource =
@@ -483,8 +493,8 @@
         return { cases, patientsById };
       }
 
-      /********** 從 cases 組出「只有病人節點 + 病人→病人邊」 **********/
-      function buildGraphElementsFromCases(cases, patientsById) {
+      /********** 從 cases 組出「只有病人節點 + 病人→病人邊」，可指定 rootPatientId **********/
+      function buildGraphElementsFromCases(cases, patientsById, rootPatientId) {
         const patientInfo = {}; // patientId -> { name, maskedLabel, firstDate }
         const contactToEvents = {}; // contactKey -> [{patientId, dateKey, organism, wardName}]
 
@@ -532,8 +542,22 @@
           });
         }
 
-        // 依「簽收日」排序給編號 No.1、No.2...
+        // 如果指定 root，但完全沒有這個病人的 MDRO 事件 → 直接回傳「找不到」
+        if (rootPatientId && !patientInfo[rootPatientId]) {
+          return {
+            elements: [],
+            patientCount: 0,
+            edgeCount: 0,
+            hasRoot: false
+          };
+        }
+
+        // 先照原規則排順序，再把 root 排到最前面
         const patientList = Object.values(patientInfo).sort((a, b) => {
+          if (rootPatientId) {
+            if (a.id === rootPatientId && b.id !== rootPatientId) return -1;
+            if (b.id === rootPatientId && a.id !== rootPatientId) return 1;
+          }
           if (a.firstDate === b.firstDate) {
             return a.id.localeCompare(b.id);
           }
@@ -545,21 +569,10 @@
           noMap[p.id] = `No.${idx + 1}`;
         });
 
-        // 建 node
-        const elements = [];
-        patientList.forEach((p) => {
-          elements.push({
-            data: {
-              id: "p-" + p.id,
-              label: `${noMap[p.id]} ${p.masked}`,
-              type: "patient"
-            }
-          });
-        });
-
-        // 建「人→人」邊：共享某一 contactKey 的病人兩兩相連
-        const ppEdgeSet = new Set();
+        // 建 adjacency（方便做 root 的連通分量）
+        const adjacency = {}; // patientId -> Set<patientId>
         const ppEdges = [];
+        const ppEdgeSet = new Set();
 
         for (const [contactKey, events] of Object.entries(contactToEvents)) {
           const patientsInContact = Array.from(
@@ -594,29 +607,76 @@
 
               ppEdges.push({
                 from: "p-" + src.id,
-                to: "p-" + tgt.id
-                // 這裡如果你想顯示「哪種菌」可以再加 label
+                to: "p-" + tgt.id,
+                srcPid: src.id,
+                tgtPid: tgt.id
               });
+
+              if (!adjacency[src.id]) adjacency[src.id] = new Set();
+              if (!adjacency[tgt.id]) adjacency[tgt.id] = new Set();
+              adjacency[src.id].add(tgt.id);
+              adjacency[tgt.id].add(src.id);
             }
           }
         }
 
+        // 如果有指定 root：只保留 root 這個 connected component
+        let reachable = null;
+        if (rootPatientId) {
+          reachable = new Set();
+          const q = [rootPatientId];
+          reachable.add(rootPatientId);
+          while (q.length) {
+            const cur = q.shift();
+            const neigh = adjacency[cur];
+            if (!neigh) continue;
+            for (const nb of neigh) {
+              if (!reachable.has(nb)) {
+                reachable.add(nb);
+                q.push(nb);
+              }
+            }
+          }
+        }
+
+        const elements = [];
+        let visiblePatientCount = 0;
+        let visibleEdgeCount = 0;
+
+        // 病人節點
+        patientList.forEach((p) => {
+          if (reachable && !reachable.has(p.id)) return;
+          visiblePatientCount++;
+          elements.push({
+            data: {
+              id: "p-" + p.id,
+              label: `${noMap[p.id]} ${p.masked}`,
+              type: "patient"
+            }
+          });
+        });
+
+        // 人→人 邊
         ppEdges.forEach((e, idx) => {
+          if (reachable) {
+            if (!reachable.has(e.srcPid) || !reachable.has(e.tgtPid)) return;
+          }
+          visibleEdgeCount++;
           elements.push({
             data: {
               id: "pp-" + idx,
               source: e.from,
               target: e.to,
               type: "pp"
-              // 若要顯示菌種，可加 label: "MRSA, 8A, 2025-01-10"
             }
           });
         });
 
         return {
           elements,
-          patientCount: patientList.length,
-          edgeCount: ppEdges.length
+          patientCount: visiblePatientCount,
+          edgeCount: visibleEdgeCount,
+          hasRoot: !rootPatientId || !!patientInfo[rootPatientId]
         };
       }
 
@@ -704,13 +764,22 @@
           const reloadBtn = document.getElementById("btn-reload-graph");
           const clearBtn = document.getElementById("btn-clear-debug");
           const selOrganism = document.getElementById("sel-organism");
+          const btnApplyRoot = document.getElementById("btn-apply-root");
+          const txtRoot = document.getElementById("txt-root-patient");
 
-          async function reloadGraph() {
+          async function reloadGraph(rootMode) {
             const opt = getSelectedBacteriaOption();
+            const rootIdInput = txtRoot.value.trim();
+            const rootPatientId = rootMode && rootIdInput ? rootIdInput : null;
 
             reloadBtn.disabled = true;
+            btnApplyRoot.disabled = true;
+
+            const rootMsg = rootPatientId
+              ? `起始病人：Patient/${rootPatientId}；`
+              : "";
             document.getElementById("graph-stats").textContent =
-              `從 FHIR 讀取資料並重建「人→人」傳播鏈中...（菌種：${opt.label}）`;
+              `${rootMsg}從 FHIR 讀取資料並重建「人→人」傳播鏈中...（菌種：${opt.label}）`;
 
             try {
               const { cases, patientsById } = await buildTransmissionData(
@@ -723,23 +792,38 @@
                   [],
                   `查無符合條件的抗藥菌 Observation（菌種：${opt.label}），無法建立人→人傳播鏈。`
                 );
-                reloadBtn.disabled = false;
                 return;
               }
 
-              const { elements, patientCount, edgeCount } =
-                buildGraphElementsFromCases(cases, patientsById);
+              const {
+                elements,
+                patientCount,
+                edgeCount,
+                hasRoot
+              } = buildGraphElementsFromCases(cases, patientsById, rootPatientId);
+
+              if (rootPatientId && !hasRoot) {
+                renderGraph(
+                  [],
+                  `在本次查詢的抗藥菌 Observation 中找不到 Patient/${rootPatientId} 的事件，請確認 ID 或測試資料。`
+                );
+                return;
+              }
 
               if (!elements.length || patientCount === 0) {
                 renderGraph(
                   [],
                   `已有抗藥菌 Observation，但無法形成兩人以上的傳播關係（菌種：${opt.label}）。`
                 );
-                reloadBtn.disabled = false;
                 return;
               }
 
-              const statsText = `節點：病人 ${patientCount} 人；邊：病人-病人 ${edgeCount} 條。（菌種：${opt.label}）`;
+              const statsText =
+                (rootPatientId
+                  ? `起始病人：Patient/${rootPatientId}。`
+                  : "") +
+                `節點：病人 ${patientCount} 人；邊：病人-病人 ${edgeCount} 條。（菌種：${opt.label}）`;
+
               renderGraph(elements, statsText);
             } catch (err) {
               console.error(err);
@@ -749,19 +833,21 @@
               renderGraph([], "建立傳播鏈失敗。");
             } finally {
               reloadBtn.disabled = false;
+              btnApplyRoot.disabled = false;
             }
           }
 
-          // 初次載入
-          await reloadGraph();
+          // 初次載入：不指定起點
+          await reloadGraph(false);
 
           // 綁定事件
-          reloadBtn.addEventListener("click", reloadGraph);
+          reloadBtn.addEventListener("click", () => reloadGraph(false));
+          btnApplyRoot.addEventListener("click", () => reloadGraph(true));
+          selOrganism.addEventListener("change", () => reloadGraph(!!txtRoot.value.trim()));
           clearBtn.addEventListener("click", () => {
             document.getElementById("debug-log").textContent =
               "// 已清除訊息，可重新操作。";
           });
-          selOrganism.addEventListener("change", reloadGraph);
         })
         .catch((err) => {
           console.error("SMART 初始化失敗", err);
