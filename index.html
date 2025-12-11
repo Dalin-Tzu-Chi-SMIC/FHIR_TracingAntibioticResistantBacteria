@@ -539,10 +539,11 @@
       }
 
       /********** 從 cases 組出「只有病人節點 + 病人→病人邊」，可指定 rootPatientId **********/
-      function buildGraphElementsFromCases(cases, patientsById, rootInputId) {
-        const patientInfo = {}; // patientId -> { name, maskedLabel, firstDate, searchKeys:[] }
-        const contactToEvents = {}; // contactKey -> [{patientId, dateKey, organism, wardName}]
+      function buildGraphElementsFromCases(cases, patientsById, rootPatientId) {
+        const patientInfo = {};      // patientId -> { id, displayName, masked, firstDate }
+        const contactToEvents = {};  // contactKey -> [{patientId, dateKey, organism, wardName}]
 
+        // 先整理每個 case
         for (const c of cases) {
           const pId = c.patientId;
 
@@ -550,31 +551,13 @@
           if (!patientInfo[pId]) {
             const p = patientsById[pId];
             let displayName = "";
-            const searchKeys = [];
 
-            if (p) {
-              // 顯示名稱
-              if (p.name && p.name[0]) {
-                const n = p.name[0];
-                const full =
-                  n.text ||
-                  `${n.family || ""}${(n.given || []).join("")}`.trim();
-                displayName = full || "";
-              }
-
-              // === 重要：把可以拿來搜尋的 key 都收集起來 ===
-              // 1) FHIR 的 Patient.id
-              if (p.id) {
-                searchKeys.push(String(p.id).trim());
-              }
-              // 2) identifier.value（病歷號之類）
-              if (Array.isArray(p.identifier)) {
-                for (const ident of p.identifier) {
-                  if (ident && ident.value) {
-                    searchKeys.push(String(ident.value).trim());
-                  }
-                }
-              }
+            if (p && p.name && p.name[0]) {
+              const n = p.name[0];
+              const full =
+                n.text ||
+                `${n.family || ""}${(n.given || []).join("")}`.trim();
+              displayName = full || "";
             }
 
             const masked = maskName(displayName) || shortId(pId) || "未知病人";
@@ -582,8 +565,7 @@
               id: pId,
               displayName,
               masked,
-              firstDate: c.dateKey || "9999-12-31",
-              searchKeys
+              firstDate: c.dateKey || "9999-12-31"
             };
           } else {
             // 更新最早日期
@@ -606,42 +588,23 @@
           });
         }
 
-        // === 先把你輸入的 rootInputId 對應成真正的 FHIR patientId ===
-        let resolvedRootId = null;
-        const trimmedInput = (rootInputId || "").trim();
+        const rootId = rootPatientId ? String(rootPatientId).trim() : "";
 
-        if (trimmedInput) {
-          const patients = Object.values(patientInfo);
-          for (const p of patients) {
-            // 直接相等（Patient.id）
-            if (String(p.id).trim() === trimmedInput) {
-              resolvedRootId = p.id;
-              break;
-            }
-            // 在 identifier.value 裡找到
-            if (p.searchKeys && p.searchKeys.some((k) => k === trimmedInput)) {
-              resolvedRootId = p.id;
-              break;
-            }
-          }
-        }
-
-        // 如果有輸入，但完全找不到對應的病人 → 回傳 hasRoot=false
-        if (trimmedInput && !resolvedRootId) {
+        // 有輸入 rootId 但這批 MDRO 病人裡面完全沒有這個人
+        if (rootId && !patientInfo[rootId]) {
           return {
             elements: [],
             patientCount: 0,
             edgeCount: 0,
-            hasRoot: false,
-            resolvedRootId: null
+            hasRoot: false
           };
         }
 
-        // 先照原規則排順序，再把 root 排到最前面
+        // 排病人順序：如果有 rootId，就把它排在最前面，其餘依 firstDate
         const patientList = Object.values(patientInfo).sort((a, b) => {
-          if (resolvedRootId) {
-            if (a.id === resolvedRootId && b.id !== resolvedRootId) return -1;
-            if (b.id === resolvedRootId && a.id !== resolvedRootId) return 1;
+          if (rootId) {
+            if (a.id === rootId && b.id !== rootId) return -1;
+            if (b.id === rootId && a.id !== rootId) return 1;
           }
           if (a.firstDate === b.firstDate) {
             return a.id.localeCompare(b.id);
@@ -654,7 +617,7 @@
           noMap[p.id] = `No.${idx + 1}`;
         });
 
-        // 建 adjacency（方便做 root 的連通分量）
+        // 建 adjacency（病人之間的圖）
         const adjacency = {}; // patientId -> Set<patientId>
         const ppEdges = [];
         const ppEdgeSet = new Set();
@@ -707,10 +670,10 @@
 
         // 如果有指定 root：只保留 root 這個 connected component
         let reachable = null;
-        if (resolvedRootId) {
+        if (rootId) {
           reachable = new Set();
-          const q = [resolvedRootId];
-          reachable.add(resolvedRootId);
+          const q = [rootId];
+          reachable.add(rootId);
           while (q.length) {
             const cur = q.shift();
             const neigh = adjacency[cur];
@@ -761,11 +724,9 @@
           elements,
           patientCount: visiblePatientCount,
           edgeCount: visibleEdgeCount,
-          hasRoot: !trimmedInput || !!resolvedRootId,
-          resolvedRootId
+          hasRoot: true
         };
       }
-
       /********** 用 Cytoscape 畫圖（只有病人節點 + 病人→病人邊） **********/
       function renderGraph(elements, statsText) {
         const statsDiv = document.getElementById("graph-stats");
@@ -860,76 +821,78 @@
           const resourceResult = document.getElementById("resource-result");
 
           async function reloadGraph(rootMode) {
-            const opt = getSelectedBacteriaOption();
-            const rootIdInput = txtRoot.value.trim(); // 你輸入的字串（可以是 FHIR id 或 病歷號）
-            const rootSearchKey = rootMode && rootIdInput ? rootIdInput : null;
+          const opt = getSelectedBacteriaOption();
+          const rootIdInput = txtRoot.value.trim(); // 你輸入的字串
+          const rootPatientId = rootMode && rootIdInput ? rootIdInput : null;
 
-            reloadBtn.disabled = true;
-            btnApplyRoot.disabled = true;
+          reloadBtn.disabled = true;
+          btnApplyRoot.disabled = true;
 
-            const rootMsg = rootSearchKey
-              ? `起始病人輸入值：${rootSearchKey}；`
-              : "";
-            document.getElementById("graph-stats").textContent =
-              `${rootMsg}從 FHIR 讀取資料並重建「人→人」傳播鏈中...（菌種：${opt.label}）`;
+          const rootMsg = rootPatientId
+            ? `起始病人 ID：${rootPatientId}；`
+            : "";
+          document.getElementById("graph-stats").textContent =
+            `${rootMsg}從 FHIR 讀取資料並重建「人→人」傳播鏈中...（菌種：${opt.label}）`;
 
-            try {
-              const { cases, patientsById } = await buildTransmissionData(
-                client,
-                opt
+          try {
+            const { cases, patientsById } = await buildTransmissionData(
+              client,
+              opt
+            );
+
+            if (!cases.length) {
+              renderGraph(
+                [],
+                `查無符合條件的抗藥菌 Observation（菌種：${opt.label}），無法建立人→人傳播鏈。`
               );
-
-              if (!cases.length) {
-                renderGraph(
-                  [],
-                  `查無符合條件的抗藥菌 Observation（菌種：${opt.label}），無法建立人→人傳播鏈。`
-                );
-                return;
-              }
-
-              const {
-                elements,
-                patientCount,
-                edgeCount,
-                hasRoot,
-                resolvedRootId
-              } = buildGraphElementsFromCases(cases, patientsById, rootSearchKey);
-
-              if (rootSearchKey && !hasRoot) {
-                renderGraph(
-                  [],
-                  `在本次查詢的抗藥菌 Observation 中找不到與輸入「${rootSearchKey}」對應的病人（可能沒有 MDRO 事件或 ID 不存在）。`
-                );
-                return;
-              }
-
-              if (!elements.length || patientCount === 0) {
-                renderGraph(
-                  [],
-                  `已有抗藥菌 Observation，但無法形成兩人以上的傳播關係（菌種：${opt.label}）。`
-                );
-                return;
-              }
-
-              const statsText =
-                (rootSearchKey
-                  ? `起始病人：Patient/${resolvedRootId || rootSearchKey}（輸入：${rootSearchKey}）。`
-                  : "") +
-                `節點：病人 ${patientCount} 人；邊：病人-病人 ${edgeCount} 條。（菌種：${opt.label}）`;
-
-              renderGraph(elements, statsText);
-            } catch (err) {
-              console.error(err);
-              logDebug(err, "建立傳播鏈失敗");
-              document.getElementById("graph-stats").innerHTML =
-                '<span class="error">無法從 FHIR 建立人→人傳播鏈，請查看下方 Debug 訊息。</span>';
-              renderGraph([], "建立傳播鏈失敗。");
-            } finally {
-              reloadBtn.disabled = false;
-              btnApplyRoot.disabled = false;
+              return;
             }
-          }
 
+            const {
+              elements,
+              patientCount,
+              edgeCount,
+              hasRoot
+            } = buildGraphElementsFromCases(
+              cases,
+              patientsById,
+              rootPatientId
+            );
+
+            if (rootPatientId && !hasRoot) {
+              renderGraph(
+                [],
+                `在本次查詢的抗藥菌 Observation 中找不到 Patient/${rootPatientId}，請確認 ID 或測試資料。`
+              );
+              return;
+            }
+
+            if (!elements.length || patientCount === 0) {
+              renderGraph(
+                [],
+                `已有抗藥菌 Observation，但無法形成兩人以上的傳播關係（菌種：${opt.label}）。`
+              );
+              return;
+            }
+
+            const statsText =
+              (rootPatientId
+                ? `起始病人：Patient/${rootPatientId}。`
+                : "") +
+              `節點：病人 ${patientCount} 人；邊：病人-病人 ${edgeCount} 條。（菌種：${opt.label}）`;
+
+            renderGraph(elements, statsText);
+          } catch (err) {
+            console.error(err);
+            logDebug(err, "建立傳播鏈失敗");
+            document.getElementById("graph-stats").innerHTML =
+              '<span class="error">無法從 FHIR 建立人→人傳播鏈，請查看下方 Debug 訊息。</span>';
+            renderGraph([], "建立傳播鏈失敗。");
+          } finally {
+            reloadBtn.disabled = false;
+            btnApplyRoot.disabled = false;
+          }
+        }
           // 初次載入：不指定起點
           await reloadGraph(false);
 
