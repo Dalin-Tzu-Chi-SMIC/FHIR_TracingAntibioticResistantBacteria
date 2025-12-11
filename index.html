@@ -202,6 +202,51 @@
         <h2>除錯訊息 / 原始 JSON</h2>
         <button id="btn-clear-debug">清除訊息</button>
         <pre id="debug-log">// 這裡會顯示 client 狀態、錯誤訊息與部分原始 JSON</pre>
+
+        <!-- === 新增：用 Resource ID 直接讀取區塊 === -->
+        <hr style="margin:1rem 0; border:none; border-top:1px solid #e5e7eb;" />
+
+        <h3 style="font-size:1rem; margin:0 0 0.5rem 0;">
+          用 Resource ID 直接讀取（完全依你輸入的 ID）
+        </h3>
+        <div
+          style="
+            display:flex;
+            flex-wrap:wrap;
+            gap:0.5rem;
+            align-items:center;
+            font-size:0.85rem;
+          "
+        >
+          <span>Resource 類型：</span>
+          <input
+            id="txt-res-type"
+            type="text"
+            value="Patient"
+            style="min-width:90px;"
+          />
+          <span>ID：</span>
+          <input
+            id="txt-res-id"
+            type="text"
+            placeholder="例如：130206 或 Observation ID"
+            style="min-width:120px;"
+          />
+          <button id="btn-read-resource">讀取 /[type]/{id}</button>
+        </div>
+        <pre
+          id="resource-result"
+          style="
+            margin-top:0.5rem;
+            max-height:260px;
+            overflow:auto;
+            font-size:0.8rem;
+            background:#020617;
+            color:#e5e7eb;
+            border-radius:6px;
+            padding:0.6rem;
+          "
+        >// 尚未用 ID 讀取任何 Resource</pre>
       </section>
     </main>
 
@@ -767,6 +812,12 @@
           const btnApplyRoot = document.getElementById("btn-apply-root");
           const txtRoot = document.getElementById("txt-root-patient");
 
+          // 新增：Resource ID 測試相關 DOM
+          const btnReadResource = document.getElementById("btn-read-resource");
+          const txtResType = document.getElementById("txt-res-type");
+          const txtResId = document.getElementById("txt-res-id");
+          const resourceResult = document.getElementById("resource-result");
+
           async function reloadGraph(rootMode) {
             const opt = getSelectedBacteriaOption();
             const rootIdInput = txtRoot.value.trim();
@@ -840,14 +891,52 @@
           // 初次載入：不指定起點
           await reloadGraph(false);
 
-          // 綁定事件
+          // 綁定事件：傳播鏈相關
           reloadBtn.addEventListener("click", () => reloadGraph(false));
           btnApplyRoot.addEventListener("click", () => reloadGraph(true));
-          selOrganism.addEventListener("change", () => reloadGraph(!!txtRoot.value.trim()));
+          selOrganism.addEventListener("change", () =>
+            reloadGraph(!!txtRoot.value.trim())
+          );
           clearBtn.addEventListener("click", () => {
             document.getElementById("debug-log").textContent =
               "// 已清除訊息，可重新操作。";
           });
+
+          // === 新增：用 Resource 類型 + ID 直接讀取（完全使用你輸入的 ID） ===
+          if (btnReadResource) {
+            btnReadResource.addEventListener("click", async () => {
+              const resType = (txtResType.value || "").trim() || "Patient";
+              const resId = (txtResId.value || "").trim();
+              if (!resId) {
+                alert("請先輸入要查詢的 ID");
+                return;
+              }
+              const path = `${resType}/${encodeURIComponent(resId)}`;
+              if (resourceResult) {
+                resourceResult.textContent = `// 讀取中：GET ${path}`;
+              }
+              logDebug(path, "以 Resource ID 讀取 Resource 路徑");
+
+              try {
+                const r = await client.request(path, { method: "GET" });
+                if (resourceResult) {
+                  resourceResult.textContent = JSON.stringify(r, null, 2);
+                }
+                logDebug(r, "以 Resource ID 讀取成功");
+              } catch (e) {
+                console.error(e);
+                if (resourceResult) {
+                  try {
+                    resourceResult.textContent =
+                      typeof e === "string" ? e : JSON.stringify(e, null, 2);
+                  } catch {
+                    resourceResult.textContent = String(e);
+                  }
+                }
+                logDebug(e, "以 Resource ID 讀取失敗");
+              }
+            });
+          }
         })
         .catch((err) => {
           console.error("SMART 初始化失敗", err);
