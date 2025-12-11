@@ -3,403 +3,312 @@
   <head>
     <meta charset="UTF-8" />
     <title>疫調傳播鏈 SMART App (FHIR Sandbox)</title>
-
     <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
-
     <script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
-
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif; margin: 0; padding: 0; background: #f5f5f7; }
       header { background: #003366; color: #fff; padding: 1rem 1.5rem; }
       header h1 { margin: 0; font-size: 1.4rem; }
-      header small { display: block; font-size: 0.8rem; opacity: 0.8; }
-      main { padding: 1rem 1.5rem 2rem 1.5rem; max-width: 1200px; margin: 0 auto; }
-      .card { background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); padding: 1rem 1.2rem; margin-bottom: 1rem; }
-      .card h2 { margin-top: 0; font-size: 1.1rem; border-bottom: 1px solid #e0e0e0; padding-bottom: 0.3rem; margin-bottom: 0.5rem; }
-      .meta-row { display: flex; flex-wrap: wrap; gap: 0.8rem 2rem; font-size: 0.9rem; }
-      .meta-label { font-weight: 600; }
-      #cy { width: 100%; height: 500px; border-radius: 6px; border: 1px solid #ddd; }
-      .stats { font-size: 0.85rem; color: #555; margin-bottom: 0.5rem; }
-      button { padding: 0.35rem 0.8rem; border-radius: 999px; border: none; background: #003366; color: #fff; cursor: pointer; font-size: 0.85rem; transition: background 0.2s; }
-      button:hover { background: #004a99; }
-      button:disabled { background: #9e9e9e; cursor: not-allowed; }
-      button.secondary { background: #6c757d; }
-      button.secondary:hover { background: #5a6268; }
-      select, input[type="text"] { padding: 0.25rem 0.5rem; border-radius: 999px; border: 1px solid #ccc; font-size: 0.85rem; }
-      .error { color: #b00020; font-weight: 600; }
-      pre { background: #111827; color: #e5e7eb; padding: 0.7rem; border-radius: 6px; font-size: 0.8rem; overflow: auto; max-height: 260px; }
-      @media (max-width: 768px) { main { padding: 0.8rem; } #cy { height: 420px; } }
+      main { padding: 1rem 1.5rem; max-width: 1200px; margin: 0 auto; }
+      .card { background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); padding: 1rem; margin-bottom: 1rem; }
+      #cy { width: 100%; height: 600px; border: 1px solid #ddd; background: #fff; border-radius: 4px; }
+      button { padding: 0.5rem 1rem; border-radius: 4px; border: none; background: #003366; color: white; cursor: pointer; }
+      button:disabled { background: #ccc; }
+      input, select { padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+      .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; margin-right: 5px; background: #eee; }
     </style>
   </head>
   <body>
     <header>
-      <h1>疫調傳播鏈 SMART App</h1>
-      <small>修復版：可自由輸入 ID 查詢</small>
+      <h1>疫調傳播鏈</h1>
+      <small>自動混合查詢：確保孤立節點也能顯示</small>
     </header>
 
     <main>
       <section class="card">
-        <h2>FHIR 連線資訊</h2>
-        <div id="meta-content" class="meta-row">
-          <span>初始化中...</span>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <label>選擇菌種：</label>
+          <select id="sel-organism">
+            <option value="ALL">全部菌種</option>
+            <option value="MRSA" selected>MRSA (Staphylococcus aureus)</option>
+            <option value="CRAB">CRAB (Acinetobacter baumannii)</option>
+            <option value="VRE">VRE (Enterococcus faecium)</option>
+          </select>
+
+          <label>病人 ID：</label>
+          <input type="text" id="txt-root-patient" placeholder="例如: 669799" style="width: 120px;">
+          
+          <button id="btn-search">🔍 查詢傳播鏈</button>
+          <button id="btn-clear" style="background:#666;">清除</button>
         </div>
+        <div id="status-msg" style="margin-top: 10px; color: #d32f2f; font-weight: bold;"></div>
       </section>
 
       <section class="card">
-        <h2>傳播鏈關係圖（人 ↔ 人）</h2>
-
-        <div class="stats" id="graph-stats">尚未載入 FHIR 資料</div>
-
-        <div style="margin-bottom: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
-          <label for="sel-organism" style="font-size: 0.85rem;">選擇抗藥菌株：</label>
-          <select id="sel-organism">
-            <option value="ALL">全部菌種（不過濾）</option>
-            <option value="CRAB">Acinetobacter baumannii(CRAB)</option>
-            <option value="E_COLI_CR">E.coli (CR)</option>
-            <option value="VRE">Enterococcus faecium(VRE)</option>
-            <option value="KP_CR">Klebsiella pneumoniae (CR)</option>
-            <option value="CRPA">Pseudomonas aeruginosa(CRPA)</option>
-            <option value="MRSA">Staphylococcus aureus(MRSA)</option>
-          </select>
-
-          <span style="font-size: 0.85rem; margin-left: 0.5rem;">起始病人 ID：</span>
-          <input
-            type="text"
-            id="txt-root-patient"
-            placeholder="請輸入 Patient ID"
-            style="min-width: 110px;"
-          />
-          
-          <button id="btn-reload-graph">重新繪製 (依輸入 ID)</button>
-          
-          <button id="btn-clear-root" class="secondary">清除 ID (看全部)</button>
-        </div>
-
-        <div style="font-size: 0.8rem; color: #555; margin-bottom: 0.5rem;">
-          邏輯：讀取最近 50 筆 Lab Observation。若輸入 ID，會將該病人標示為 No.1 並只顯示相關連結。<br/>
-          <b style="color:#d32f2f;">注意：</b>如果輸入 ID 後顯示「找不到」，代表該病人的 Observation 不在最近 50 筆資料內。
-        </div>
-
         <div id="cy"></div>
       </section>
 
       <section class="card">
-        <h2>除錯訊息 / 原始 JSON</h2>
-        <button id="btn-clear-debug" class="secondary">清除訊息</button>
-        <pre id="debug-log">// 這裡會顯示 client 狀態與錯誤訊息</pre>
-
-        <hr style="margin:1rem 0; border:none; border-top:1px solid #e5e7eb;" />
-
-        <h3 style="font-size:1rem; margin:0 0 0.5rem 0;">
-          用 Resource ID 直接讀取（完全依你輸入的 ID）
-        </h3>
-        <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center; font-size:0.85rem;">
-          <span>Type：</span>
-          <input id="txt-res-type" type="text" value="Patient" style="width:70px;" />
-          <span>ID：</span>
-          <input id="txt-res-id" type="text" placeholder="輸入 ID..." style="min-width:120px;" />
-          <button id="btn-read-resource">讀取 Resource</button>
-        </div>
-        <pre id="resource-result" style="margin-top:0.5rem; background:#020617; color:#e5e7eb; border-radius:6px; padding:0.6rem;">// 尚未讀取</pre>
+        <h3>Debug Log</h3>
+        <pre id="debug-log" style="background:#111; color:#0f0; padding:10px; height:200px; overflow:auto;"></pre>
       </section>
     </main>
 
     <script>
-      /********** 抗藥菌株選項設定 **********/
-      const BACTERIA_OPTIONS = [
-        { id: "ALL", label: "全部菌種（不過濾）", keywords: [] },
-        { id: "CRAB", label: "Acinetobacter baumannii(CRAB)", keywords: ["acinetobacter", "baumannii", "crab"] },
-        { id: "E_COLI_CR", label: "E.coli (CR)", keywords: ["e.coli", "escherichia coli", "cr e.coli"] },
-        { id: "VRE", label: "Enterococcus faecium(VRE)", keywords: ["enterococcus faecium", "vre"] },
-        { id: "KP_CR", label: "Klebsiella pneumoniae (CR)", keywords: ["klebsiella pneumoniae", "cr kp", "cr klebsiella"] },
-        { id: "CRPA", label: "Pseudomonas aeruginosa(CRPA)", keywords: ["pseudomonas aeruginosa", "crpa"] },
-        { id: "MRSA", label: "Staphylococcus aureus(MRSA)", keywords: ["staphylococcus aureus", "mrsa"] }
-      ];
-
-      function getSelectedBacteriaOption() {
-        const sel = document.getElementById("sel-organism");
-        const val = sel.value || "ALL";
-        return BACTERIA_OPTIONS.find((x) => x.id === val) || BACTERIA_OPTIONS[0];
-      }
-
-      function logDebug(obj, title) {
-        const pre = document.getElementById("debug-log");
-        const now = new Date().toISOString().split('T')[1].split('.')[0];
-        let text = pre.textContent || "";
-        text += `\n[${now}] ${title || "Info"}: `;
-        try {
-            text += (typeof obj === "object") ? JSON.stringify(obj, null, 2) : String(obj);
-        } catch { text += String(obj); }
-        pre.textContent = text;
-        pre.scrollTop = pre.scrollHeight;
+      // 1. 工具函式
+      function log(msg) {
+        const d = document.getElementById("debug-log");
+        d.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+        d.scrollTop = d.scrollHeight;
+        console.log(msg);
       }
 
       function maskName(name) {
-        if (!name) return "";
-        const s = name.trim();
-        return s.length > 2 ? s[0] + "○" + s.slice(2) : s[0] + "○";
+        if (!name) return "未知";
+        return name.length > 2 ? name[0] + "○" + name.slice(2) : name[0] + "○";
       }
 
-      function isAntibioticRelatedObservation(obs) {
-        // 簡化版判斷，與原版相同邏輯
-        if (!obs || !obs.code) return false;
-        const raw = JSON.stringify(obs).toLowerCase();
-        const keywords = ["mrsa", "vre", "acinetobacter", "baumannii", "crab", "pseudomonas", "crpa", "klebsiella", "e.coli", "resistant", "mdro", "多重抗藥"];
-        return keywords.some(k => raw.includes(k));
-      }
-
-      function isObservationMatchBacteria(obs, organismText, bacteriaOption) {
-        if (!bacteriaOption || bacteriaOption.id === "ALL") return true;
-        const hay = `${organismText || ""} ${(obs.valueString || "")}`.toLowerCase();
-        return bacteriaOption.keywords.some((k) => hay.includes(k));
-      }
-
-      // --- 核心邏輯區 ---
-
-      async function buildTransmissionData(client, bacteriaOption) {
-        // 這裡抓取最近 50 筆 Observation
-        // 注意：如果指定 ID 的病人最近沒有檢查，或者不在這 50 筆內，就會找不到
-        const url = "Observation?category=laboratory&_count=50" +
-          "&_include=Observation:subject" +
-          "&_include=Observation:encounter" +
-          "&_include:iterate=Encounter:location";
-
-        const bundle = await client.request(url, { flat: false });
-        const entries = bundle.entry || [];
+      // 2. 核心邏輯
+      async function drawGraph(client) {
+        const btn = document.getElementById("btn-search");
+        const status = document.getElementById("status-msg");
+        const rootId = document.getElementById("txt-root-patient").value.trim();
+        const organismType = document.getElementById("sel-organism").value;
         
-        const patientsById = {};
-        const encountersById = {};
-        const locationsById = {};
-        const observations = [];
-
-        // 1. 分類 Resources
-        entries.forEach(e => {
-            const r = e.resource;
-            if(!r) return;
-            if(r.resourceType === 'Patient') patientsById[r.id] = r;
-            if(r.resourceType === 'Encounter') encountersById[r.id] = r;
-            if(r.resourceType === 'Location') locationsById[r.id] = r;
-            if(r.resourceType === 'Observation') observations.push(r);
-        });
-
-        const cases = [];
-        for (const obs of observations) {
-          if (!isAntibioticRelatedObservation(obs)) continue;
-          
-          const subjRef = obs.subject?.reference || "";
-          const patientId = subjRef.split("/")[1];
-          if(!patientId) continue;
-
-          // 簡單抓病房名
-          let wardName = "未知地點";
-          const encId = obs.encounter?.reference?.split("/")[1];
-          if(encId && encountersById[encId]) {
-             const enc = encountersById[encId];
-             if(enc.location && enc.location.length > 0) {
-                 const locRef = enc.location[0].location?.reference;
-                 if(locRef) {
-                     const locId = locRef.split("/")[1];
-                     if(locationsById[locId]) wardName = locationsById[locId].name || wardName;
-                 }
-                 if(wardName === "未知地點" && enc.location[0].location?.display) wardName = enc.location[0].location.display;
-             }
-          }
-
-          const organism = obs.code?.text || "未標註菌名";
-          if (!isObservationMatchBacteria(obs, organism, bacteriaOption)) continue;
-
-          cases.push({
-            obsId: obs.id,
-            patientId,
-            wardName,
-            organism,
-            dateKey: obs.effectiveDateTime ? obs.effectiveDateTime.substring(0,10) : "未知日期"
-          });
-        }
-        return { cases, patientsById };
-      }
-
-      function buildGraphElements(cases, patientsById, rootPatientId) {
-         // 簡化版圖形建構
-         const nodes = new Map();
-         const edges = [];
-         
-         // 建立節點
-         cases.forEach(c => {
-             const pid = c.patientId;
-             if(!nodes.has(pid)) {
-                 const p = patientsById[pid];
-                 const name = p?.name?.[0]?.text || p?.name?.[0]?.family || pid;
-                 nodes.set(pid, { id: pid, label: maskName(name) + `\n(${pid})` });
-             }
-         });
-
-         // 建立邊 (同一天、同一病房、同一菌種)
-         for(let i=0; i<cases.length; i++) {
-             for(let j=i+1; j<cases.length; j++) {
-                 const c1 = cases[i];
-                 const c2 = cases[j];
-                 if(c1.patientId === c2.patientId) continue;
-                 // 簡單判定：同病房且同菌種
-                 if(c1.wardName === c2.wardName && c1.organism === c2.organism) {
-                     edges.push({ source: c1.patientId, target: c2.patientId });
-                 }
-             }
-         }
-
-         // 過濾：如果有指定 root，只留相關
-         let finalPids = new Set(nodes.keys());
-         if(rootPatientId) {
-             if(!nodes.has(rootPatientId)) return { elements: [], hasRoot: false };
-             // 這裡省略複雜的遍歷，暫時只顯示 Root 本人與其直接接觸者
-             const connected = new Set([rootPatientId]);
-             edges.forEach(e => {
-                 if(e.source === rootPatientId) connected.add(e.target);
-                 if(e.target === rootPatientId) connected.add(e.source);
-             });
-             finalPids = connected;
-         }
-
-         const elements = [];
-         finalPids.forEach(pid => {
-             const n = nodes.get(pid);
-             const isRoot = pid === rootPatientId;
-             elements.push({ 
-                 data: { id: pid, label: n.label, type: 'patient' },
-                 style: isRoot ? { 'background-color': '#d93025', 'border-width': 4, 'width':60, 'height':60 } : {}
-             });
-         });
-         
-         edges.forEach((e, idx) => {
-             if(finalPids.has(e.source) && finalPids.has(e.target)) {
-                 elements.push({ data: { id: 'e'+idx, source: e.source, target: e.target, type: 'pp' } });
-             }
-         });
-
-         return { elements, hasRoot: true, count: finalPids.size };
-      }
-
-      function renderGraph(elements, msg) {
-        document.getElementById("graph-stats").innerHTML = msg;
-        cytoscape({
-          container: document.getElementById("cy"),
-          elements: elements,
-          style: [
-            { selector: "node", style: { "background-color": "#4285f4", label: "data(label)", "text-valign": "center", "text-wrap": "wrap", color: "#fff", "font-size":10, width:40, height:40 } },
-            { selector: "edge", style: { "line-color": "#ccc", width: 2 } }
-          ],
-          layout: { name: "cose", animate: false }
-        });
-      }
-
-      // --- 初始化 ---
-
-      FHIR.oauth2.ready().then(async (client) => {
-        const state = client.state;
-        const patientId = client.patient.id || "";
+        btn.disabled = true;
+        status.textContent = "正在向 FHIR Server 查詢資料，請稍候...";
+        log("開始查詢...");
         
-        // 顯示連線資訊
-        document.getElementById("meta-content").innerHTML = `
-            <div><b>Server:</b> ${state.serverUrl}</div>
-            <div><b>Token Scope:</b> ${state.tokenResponse?.scope || "無"}</div>
-            <div><b>Context Patient ID:</b> ${patientId || "無 (System/User Scope)"}</div>
-        `;
-
-        // ★★★ 關鍵修復 1：自動填入 Context ID 到輸入框 (方便使用者) ★★★
-        if(patientId) {
-            document.getElementById("txt-root-patient").value = patientId;
-            document.getElementById("txt-res-id").value = patientId;
-        }
-
-        const txtRoot = document.getElementById("txt-root-patient");
-        const btnReload = document.getElementById("btn-reload-graph");
-        const btnClearRoot = document.getElementById("btn-clear-root");
-        const selOrganism = document.getElementById("sel-organism");
-
-        // ★★★ 關鍵修復 2：统一的 Reload 邏輯 ★★★
-        async function doReload() {
-            btnReload.disabled = true;
-            const rootInput = txtRoot.value.trim();
-            const opt = getSelectedBacteriaOption();
+        try {
+            // --- 步驟 A: 混合查詢策略 ---
+            // 策略：不管使用者有沒有輸入 ID，我們都查最近 100 筆 (找群聚)。
+            // 如果有輸入 ID，額外再查該病人的資料，確保他一定會出現 (即使他是孤點)。
             
-            document.getElementById("graph-stats").textContent = "讀取中...";
-            try {
-                const { cases, patientsById } = await buildTransmissionData(client, opt);
-                if(cases.length === 0) {
-                    renderGraph([], `找不到 ${opt.label} 相關資料。`);
-                    return;
-                }
-                
-                // 這裡會自動判斷：如果有輸入 ID，就以此過濾；沒輸入，就顯示全部
-                const { elements, hasRoot, count } = buildGraphElements(cases, patientsById, rootInput);
-                
-                if(rootInput && !hasRoot) {
-                    renderGraph([], `<span class="error">在最近 50 筆資料中找不到 ID: ${rootInput}。請確認該病人是否有相關檢驗。</span>`);
-                } else {
-                    renderGraph(elements, `顯示 ${count} 位病人 (菌種: ${opt.label}) ${rootInput ? `[起點: ${rootInput}]` : ""}`);
-                }
-            } catch(e) {
-                console.error(e);
-                logDebug(e, "Error");
-                renderGraph([], "發生錯誤，請看下方 Debug");
-            } finally {
-                btnReload.disabled = false;
+            const promises = [];
+            
+            // Query 1: 全域最近 100 筆 (抓背景值)
+            const qGlobal = "Observation?category=laboratory&_count=100" +
+                            "&_include=Observation:subject" +
+                            "&_include=Observation:encounter" +
+                            "&_include:iterate=Encounter:location";
+            promises.push(client.request(qGlobal, { flat: false }));
+
+            // Query 2: 指定病人 (如果有輸入)
+            if (rootId) {
+                log(`額外鎖定查詢病人: ${rootId}`);
+                const qRoot = `Observation?category=laboratory&subject=Patient/${rootId}` +
+                              "&_include=Observation:subject" +
+                              "&_include=Observation:encounter" +
+                              "&_include:iterate=Encounter:location";
+                promises.push(client.request(qRoot, { flat: false }));
             }
-        }
 
-        btnReload.addEventListener("click", doReload);
-        selOrganism.addEventListener("change", doReload);
-        
-        // 清除按鈕
-        btnClearRoot.addEventListener("click", () => {
-            txtRoot.value = "";
-            doReload();
-        });
-
-        // 第一次自動載入
-        doReload();
-
-
-        // --- 下方 Debug / Resource 讀取區 ---
-        const btnRead = document.getElementById("btn-read-resource");
-        const txtResType = document.getElementById("txt-res-type");
-        const txtResId = document.getElementById("txt-res-id");
-        const resOutput = document.getElementById("resource-result");
-        const btnClearDebug = document.getElementById("btn-clear-debug");
-
-        btnClearDebug.addEventListener("click", () => {
-            document.getElementById("debug-log").textContent = "// 已清除";
-        });
-
-        if(btnRead) {
-            btnRead.addEventListener("click", async () => {
-                // ★★★ 關鍵修復 3：確保讀取當下輸入框的值 ★★★
-                const rType = (txtResType.value || "").trim();
-                const rId = (txtResId.value || "").trim();
-
-                logDebug(`Type=[${rType}], ID=[${rId}]`, "準備讀取");
-
-                if(!rId) {
-                    alert("請輸入 ID");
-                    return;
-                }
-
-                resOutput.textContent = "// 讀取中...";
-                try {
-                    const path = `${rType}/${encodeURIComponent(rId)}`;
-                    const res = await client.request(path);
-                    resOutput.textContent = JSON.stringify(res, null, 2);
-                    logDebug(`讀取成功: ${path}`);
-                } catch(e) {
-                    resOutput.textContent = "// 讀取失敗: " + e;
-                    logDebug(e, "讀取失敗");
+            const results = await Promise.all(promises);
+            
+            // --- 步驟 B: 合併與去重 ---
+            const allResources = [];
+            const seenIds = new Set();
+            
+            results.forEach(bundle => {
+                if(bundle.entry) {
+                    bundle.entry.forEach(e => {
+                        if(e.resource && !seenIds.has(e.resource.id)) {
+                            seenIds.add(e.resource.id);
+                            allResources.push(e.resource);
+                        }
+                    });
                 }
             });
-        }
 
-      }).catch(err => {
-          document.getElementById("meta-content").innerHTML = `<span class="error">啟動失敗: ${err}</span>`;
-      });
+            log(`共取得 ${allResources.length} 個 Resources`);
+
+            // --- 步驟 C: 解析資料 ---
+            const patients = {};
+            const encounters = {};
+            const locations = {};
+            const obsList = [];
+
+            allResources.forEach(r => {
+                if(r.resourceType === "Patient") patients[r.id] = r;
+                if(r.resourceType === "Encounter") encounters[r.id] = r;
+                if(r.resourceType === "Location") locations[r.id] = r;
+                if(r.resourceType === "Observation") obsList.push(r);
+            });
+
+            // --- 步驟 D: 建立案例 (Cases) ---
+            const nodes = new Map(); // patientId -> NodeInfo
+            const links = [];
+
+            // 關鍵字過濾器
+            const keywords = {
+                "MRSA": ["mrsa", "staphylococcus", "aureus"],
+                "CRAB": ["crab", "acinetobacter", "baumannii"],
+                "VRE": ["vre", "enterococcus"],
+                "ALL": []
+            };
+            const currentKeywords = keywords[organismType];
+
+            for(const obs of obsList) {
+                // 1. 檢查是否為抗藥菌
+                const rawCode = JSON.stringify(obs.code || {}).toLowerCase();
+                const rawValue = (obs.valueString || "").toLowerCase();
+                const fullText = rawCode + " " + rawValue;
+
+                // 先檢查是否符合 MDRO 大類
+                const isMDRO = ["mrsa","vre","crab","acinetobacter","baumannii","pseudomonas","klebsiella","e.coli","resistant"].some(k => fullText.includes(k));
+                if(!isMDRO) continue;
+
+                // 再檢查是否符合下拉選單
+                if(organismType !== "ALL") {
+                    const match = currentKeywords.some(k => fullText.includes(k));
+                    if(!match) continue;
+                }
+
+                // 2. 解析病人
+                const patRef = obs.subject?.reference || "";
+                const patId = patRef.includes('/') ? patRef.split('/').pop() : patRef;
+                if(!patients[patId]) continue; // 沒抓到病人檔就不處理
+
+                // 3. 解析病房與日期 (關鍵！)
+                const dateKey = obs.effectiveDateTime ? obs.effectiveDateTime.substring(0, 10) : "無日期";
+                
+                let wardName = "未知病房";
+                const encRef = obs.encounter?.reference || "";
+                const encId = encRef.includes('/') ? encRef.split('/').pop() : encRef;
+                
+                if(encId && encounters[encId]) {
+                    const enc = encounters[encId];
+                    // 嘗試從 Location Resource 抓
+                    if(enc.location && enc.location.length > 0) {
+                         const locRef = enc.location[0].location?.reference;
+                         const locDisplay = enc.location[0].location?.display; // 備用
+                         
+                         if(locRef) {
+                             const locId = locRef.includes('/') ? locRef.split('/').pop() : locRef;
+                             if(locations[locId]) {
+                                 wardName = locations[locId].name;
+                             }
+                         }
+                         // 如果 Resource 沒抓到，用 display 補救
+                         if(wardName === "未知病房" && locDisplay) {
+                             wardName = locDisplay;
+                         }
+                    }
+                }
+
+                // 儲存節點資訊
+                const pName = maskName(patients[patId].name?.[0]?.text || "Unknown");
+                nodes.set(patId, { id: patId, name: pName, ward: wardName, date: dateKey, organism: organismType });
+                
+                log(`找到案例: ID=${patId}, 病房=${wardName}, 日期=${dateKey}`);
+            }
+
+            // --- 步驟 E: 建立連線 (Edges) ---
+            // 邏輯: 同病房 + 同日期 = 有連線
+            const nodeList = Array.from(nodes.values());
+            
+            for(let i=0; i<nodeList.length; i++) {
+                for(let j=i+1; j<nodeList.length; j++) {
+                    const a = nodeList[i];
+                    const b = nodeList[j];
+                    
+                    // 寬鬆判定：只要病房名稱一樣 (且不是未知)，且日期一樣
+                    if(a.ward !== "未知病房" && a.ward === b.ward && a.date === b.date) {
+                        links.push({ source: a.id, target: b.id });
+                        log(`建立連線: ${a.id} <--> ${b.id}`);
+                    }
+                }
+            }
+
+            // --- 步驟 F: 繪圖 ---
+            const elements = [];
+            
+            // 1. 如果有指定 Root ID，且他不在結果中，顯示錯誤
+            if(rootId && !nodes.has(rootId)) {
+                status.textContent = `查無病人 ${rootId} 的抗藥菌資料 (可能是日期太久遠或篩選條件不符)`;
+            } else {
+                status.textContent = `查詢完成。找到 ${nodes.size} 位病人，${links.length} 條連線。`;
+            }
+
+            // 2. 加入節點
+            nodes.forEach(n => {
+                const isRoot = (n.id === rootId);
+                elements.push({
+                    data: { 
+                        id: n.id, 
+                        label: `${n.name}\n${n.ward}\n${n.date}`,
+                        color: isRoot ? "#d93025" : "#4285f4" // Root 為紅色，其他人藍色
+                    }
+                });
+            });
+
+            // 3. 加入連線
+            links.forEach((l, idx) => {
+                elements.push({ data: { id: 'e'+idx, source: l.source, target: l.target } });
+            });
+
+            if(elements.length === 0) {
+                status.textContent = "沒有符合條件的資料。";
+            }
+
+            cytoscape({
+                container: document.getElementById('cy'),
+                elements: elements,
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'background-color': 'data(color)',
+                            'label': 'data(label)',
+                            'color': '#333',
+                            'font-size': '10px',
+                            'text-wrap': 'wrap',
+                            'text-valign': 'center',
+                            'text-halign': 'center',
+                            'width': '60px',
+                            'height': '60px'
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 3,
+                            'line-color': '#ccc',
+                            'target-arrow-color': '#ccc',
+                            'target-arrow-shape': 'triangle'
+                        }
+                    }
+                ],
+                layout: { name: 'cose', animate: false }
+            });
+
+        } catch (err) {
+            console.error(err);
+            log("錯誤: " + err.message);
+            status.textContent = "發生錯誤，請查看 Debug Log";
+        } finally {
+            btn.disabled = false;
+        }
+      }
+
+      // 3. 初始化 SMART Client
+      FHIR.oauth2.ready().then(client => {
+          log("FHIR Client 初始化成功");
+          log("Server: " + client.state.serverUrl);
+          
+          if(client.patient.id) {
+              document.getElementById("txt-root-patient").value = client.patient.id;
+          }
+
+          document.getElementById("btn-search").addEventListener("click", () => drawGraph(client));
+          document.getElementById("btn-clear").addEventListener("click", () => {
+              document.getElementById("txt-root-patient").value = "";
+              drawGraph(client); // 清除後查全域
+          });
+
+          // 自動執行一次
+          // drawGraph(client); 
+      }).catch(console.error);
     </script>
   </body>
 </html>
