@@ -137,7 +137,7 @@
   <body>
     <header>
       <h1>疫調傳播鏈 SMART App</h1>
-      <small>從 FHIR(Observation / Encounter) 組出傳播鏈關係圖</small>
+      <small>從 FHIR(Observation / Encounter) 組出「病人 → 病人」傳播鏈（透過指定菌株）</small>
     </header>
 
     <main>
@@ -151,7 +151,7 @@
 
       <!-- 傳播鏈圖 -->
       <section class="card">
-        <h2>傳播鏈關係圖（病人 ↔ 共同接觸點）</h2>
+        <h2>傳播鏈關係圖（病人 → 病人，附菌株與病房）</h2>
 
         <div class="stats" id="graph-stats">尚未載入 FHIR 資料</div>
 
@@ -175,17 +175,12 @@
             <option value="MRSA">Staphylococcus aureus(MRSA)</option>
           </select>
 
-          <label for="txt-patient-id" style="font-size: 0.85rem;">指定病人 Patient ID：</label>
-          <input
-            id="txt-patient-id"
-            type="text"
-            placeholder="例如 130206（留白 = 多病人模式）"
-            style="max-width: 230px;"
-          />
+          <label for="txt-patient-filter" style="font-size: 0.85rem;">僅保留包含此 Patient ID 的節點（可空白）：</label>
+          <input id="txt-patient-filter" type="text" placeholder="例如 130206" />
 
           <button id="btn-reload-graph">重新從 FHIR 重建傳播鏈圖</button>
           <span style="font-size: 0.8rem; color: #555;">
-            邏輯：依選定菌種篩選 Observation，再用「菌種 + Encounter 地點 + 日期」產生接觸點，將共用接觸點的病人連成鏈。（目前最多抓前 20 筆）
+            邏輯：依「病房 + 菌種」分群；按檢出時間排序，較早病人 → 較晚病人，邊上標示菌名與病房。（目前最多抓前 50 筆 Observation）
           </span>
         </div>
 
@@ -216,7 +211,7 @@
         {
           id: "E_COLI_CR",
           label: "E.coli (CR)",
-          keywords: ["e.coli", "escherichia coli", "cr e.coli"],
+          keywords: ["e.coli", "escherichia coli", "cr e.coli", "e coli (cr)"],
         },
         {
           id: "VRE",
@@ -260,7 +255,7 @@
         pre.textContent = text;
       }
 
-      /********** 小工具：Mask 病人名稱 / ID **********/
+      /********** 小工具：Mask 病人姓名 **********/
       function maskName(name) {
         if (!name) return "";
         const s = name.trim();
@@ -269,6 +264,7 @@
         return s[0] + "○" + s.slice(2);
       }
 
+      /********** 小工具：短 ID **********/
       function shortId(id) {
         if (!id) return "";
         const s = String(id);
@@ -276,53 +272,30 @@
         return s.slice(0, 2) + "…" + s.slice(-2);
       }
 
-      /********** 判斷：Observation 是否與「抗藥/感染」相關 **********/
-      function isAntibioticRelatedObservation(obs) {
-        if (!obs || !obs.code) return false;
+      /********** 從 Observation 判斷是否 MDRO，並回傳對應菌種選項 **********/
+      function detectMdroFromObservation(obs) {
+        if (!obs || !obs.code) return null;
 
-        const text = (obs.code.text || "").toLowerCase();
-        const codings = obs.code.coding || [];
+        const code = obs.code || {};
+        const coding0 = (code.coding && code.coding[0]) || {};
+        const text =
+          (code.text || "") +
+          " " +
+          (coding0.display || "") +
+          " " +
+          (coding0.code || "");
+        const hay = text.toLowerCase();
 
-        const codeStrings = codings
-          .map(
-            (c) =>
-              `${c.system || ""}|${c.code || ""}|${c.display || ""}`.toLowerCase()
-          )
-          .join(" ");
-
-        // 1) 先用關鍵字粗略篩選 (院內可改成實際檢驗名稱/代碼)
-        const keywords = [
-          "culture",
-          "bacteria",
-          "bacteri",
-          "organism",
-          "antibiotic",
-          "susceptibil",
-          "resistan",
-          "mrsa",
-          "vre",
-          "esbl",
-          "carbapenem",
-          "acinetobacter",
-          "pseudomonas",
-          "klebsiella",
-        ];
-
-        const haystack = (text + " " + codeStrings).toLowerCase();
-        const hitKeyword = keywords.some((k) => haystack.includes(k));
-
-        // 只要像是「微生物/抗藥」就先收，後續再用菌種下拉做第二層過濾
-        if (!hitKeyword) return false;
-
-        return true;
-      }
-
-      /********** 判斷：Observation 是否符合下拉選到的菌種 **********/
-      function isObservationMatchBacteria(obs, organismText, bacteriaOption) {
-        if (!bacteriaOption || bacteriaOption.id === "ALL") return true;
-        const hay = (organismText || "").toLowerCase();
-        if (!hay) return false;
-        return bacteriaOption.keywords.some((k) => hay.includes(k));
+        for (const opt of BACTERIA_OPTIONS) {
+          if (opt.id === "ALL") continue;
+          if (opt.keywords.some((k) => hay.includes(k))) {
+            return {
+              option: opt,
+              organismLabel: code.text || coding0.display || coding0.code || opt.label,
+            };
+          }
+        }
+        return null;
       }
 
       /********** 畫 FHIR 連線資訊 **********/
@@ -353,45 +326,20 @@
         `;
       }
 
-      /********** 從 FHIR 建立傳播鏈所需的資料結構 **********/
-      async function buildTransmissionData(client, bacteriaOption, manualPatientId) {
-        const state = client.state || {};
-        const contextPatientId =
-          state.patientId || (client.patient && client.patient.id) || null;
-
-        const targetPatientId = manualPatientId || contextPatientId || null;
-
-        let bundle = null;
-        let isSinglePatientMode = false;
-
-        if (targetPatientId) {
-          // 🔹 指定病人模式：subject=Patient/{id}
-          isSinglePatientMode = true;
-          const encodedId = encodeURIComponent(targetPatientId);
-          const query = `Observation?subject=Patient/${encodedId}&category=laboratory&_count=20&_include=Observation:subject&_include=Observation:encounter&_include:iterate=Encounter:location`;
-          bundle = await client.request(query, { flat: false });
-          logDebug(
-            bundle,
-            `Observation Bundle（指定病人 ${targetPatientId}，_count=20, laboratory）`
-          );
-        } else {
-          // 🔹 多病人模式
-          bundle = await client.request(
-            "Observation?category=laboratory&_count=20&_include=Observation:subject&_include=Observation:encounter",
-            { flat: false }
-          );
-          logDebug(
-            bundle,
-            "Observation Bundle（多病人模式，_count=20, laboratory）"
-          );
-        }
+      /********** 從 FHIR 建立「MDRO 個案」清單 **********/
+      async function buildTransmissionData(client, bacteriaOption, patientFilterId) {
+        // 這裡直接用多病人查詢（實務上可改成院內授權的 system-level 查詢）
+        const bundle = await client.request(
+          "Observation?category=laboratory&_count=50&_include=Observation:subject&_include=Observation:encounter&_include:iterate=Encounter:location",
+          { flat: false }
+        );
+        logDebug(bundle, "Observation Bundle（多病人模式，_count=50, laboratory）");
 
         const entries = bundle.entry || [];
-        const patientsById = {}; // id -> Patient resource
-        const encountersById = {}; // id -> Encounter resource
+        const patientsById = {};
+        const encountersById = {};
         const observations = [];
 
-        // 收集 Observation / Patient / Encounter / Location
         for (const e of entries) {
           const res = e.resource;
           if (!res || !res.resourceType) continue;
@@ -404,34 +352,37 @@
           }
         }
 
-        // 單病人模式補抓 Patient（如果沒有被 _include 到）
-        if (isSinglePatientMode && targetPatientId && !patientsById[targetPatientId]) {
-          try {
-            const p = await client.request(`Patient/${encodeURIComponent(targetPatientId)}`);
-            patientsById[p.id] = p;
-            logDebug(p, "補抓 Patient（單一病人模式）");
-          } catch (err) {
-            logDebug(err, "補抓 Patient 失敗");
-          }
-        }
-
-        const cases = []; // 每一個 case 對應一個「抗藥菌事件」
+        const cases = [];
 
         for (const obs of observations) {
-          if (!isAntibioticRelatedObservation(obs)) {
-            continue;
+          const mdro = detectMdroFromObservation(obs);
+          if (!mdro) continue; // 不是我們關心的 MDRO
+
+          // 若有菌種篩選，需比對
+          if (bacteriaOption && bacteriaOption.id !== "ALL") {
+            if (!mdro || mdro.option.id !== bacteriaOption.id) continue;
           }
 
           const subjRef = obs.subject && obs.subject.reference;
           if (!subjRef || !subjRef.startsWith("Patient/")) continue;
           const patientId = subjRef.split("/")[1];
 
-          if (isSinglePatientMode && targetPatientId && patientId !== targetPatientId) {
-            continue;
+          if (patientFilterId) {
+            // 若有指定只看某病人相關事件，則要求「邊中至少一端是此病人」
+            // 這裡先保留全部個案，之後建圖再過濾
           }
 
           const patientRes = patientsById[patientId];
+          let patientName = "";
+          if (patientRes && Array.isArray(patientRes.name) && patientRes.name[0]) {
+            const n = patientRes.name[0];
+            const full =
+              n.text ||
+              `${n.family || ""}${(n.given || []).join("")}`.trim();
+            patientName = full || "";
+          }
 
+          // Encounter / 病房
           const encRef = obs.encounter && obs.encounter.reference;
           let enc = null;
           let wardName = "";
@@ -449,36 +400,23 @@
               "";
           }
 
-          const code = obs.code || {};
-          const coding0 = (code.coding && code.coding[0]) || {};
-          const organismTextSource =
-            (code.text || "") +
-            " " +
-            (coding0.display || "") +
-            " " +
-            (coding0.code || "");
-          const organism =
-            code.text || coding0.display || coding0.code || "未標註菌名";
-
-          if (!isObservationMatchBacteria(obs, organismTextSource, bacteriaOption)) {
-            continue;
-          }
-
+          // 檢驗時間
           const effective =
             obs.effectiveDateTime ||
             (obs.effectivePeriod && obs.effectivePeriod.start) ||
             obs.issued ||
             "";
           const dateKey = effective ? String(effective).slice(0, 10) : "未知日期";
-          const locKey = wardName || "未知地點";
+          const effectiveDt = effective ? new Date(effective) : null;
 
           cases.push({
             obsId: obs.id,
             patientId,
-            patientRes,
-            encounter: enc,
-            wardName: locKey,
-            organism,
+            patientName,
+            wardName: wardName || "未知病房",
+            organismId: mdro.option.id,
+            organismLabel: mdro.organismLabel,
+            effective: effectiveDt,
             dateKey,
           });
         }
@@ -487,150 +425,189 @@
           {
             caseCount: cases.length,
             patientCount: Object.keys(patientsById).length,
-            bacteria: bacteriaOption.label,
-            mode: isSinglePatientMode ? `單一病人：${targetPatientId || ""}` : "多病人",
+            bacteria: bacteriaOption ? bacteriaOption.label : "ALL",
           },
-          "初步病例 Case 數統計（依菌株過濾後）"
+          "初步病例 Case 數統計（依菌株過濾後，尚未建圖）"
         );
 
-        return { cases, patientsById, isSinglePatientMode, targetPatientId };
+        return { cases, patientsById };
       }
 
-      /********** 從 cases 組出「病人節點 + 接觸點節點 + 邊」 **********/
-      function buildGraphElementsFromCases(cases, patientsById) {
-        const patientNodeMap = {}; // patientId -> node
-        const contactNodeMap = {}; // contactKey -> node
-        const pcEdges = [];
-        const ppEdgeSet = new Set();
-        const contactToPatients = {};
-
-        for (const c of cases) {
-          const pId = c.patientId;
-
-          // 病人節點
-          if (!patientNodeMap[pId]) {
-            const p = patientsById[pId];
-            let displayName = "";
-
-            if (p && p.name && p.name[0]) {
-              const n = p.name[0];
-              const full =
-                n.text ||
-                `${n.family || ""}${(n.given || []).join("")}`.trim();
-              displayName = full || "";
-            }
-
-            const masked =
-              maskName(displayName) || shortId(pId) || "未知病人";
-            patientNodeMap[pId] = {
-              id: "p-" + pId,
-              label: masked,
-            };
-          }
-
-          // 接觸點：病房 + 菌名 + 日期
-          const contactKey = `${c.wardName}|${c.organism}|${c.dateKey}`;
-          if (!contactNodeMap[contactKey]) {
-            const nodeId =
-              "c-" +
-              btoa(unescape(encodeURIComponent(contactKey))).replace(/=/g, "");
-            const label = `${c.wardName}\n${c.organism}\n${c.dateKey}`;
-            contactNodeMap[contactKey] = {
-              id: nodeId,
-              label,
-            };
-          }
-
-          pcEdges.push({
-            patientId: pId,
-            contactKey,
-          });
-
-          if (!contactToPatients[contactKey]) {
-            contactToPatients[contactKey] = new Set();
-          }
-          contactToPatients[contactKey].add(pId);
+      /********** 從 cases 建出「病人節點 + 病人→病人」 **********/
+      function buildGraphElementsFromCases(cases, patientsById, patientFilterId) {
+        if (!cases.length) {
+          return {
+            elements: [],
+            patientCount: 0,
+            edgeCount: 0,
+          };
         }
 
-        // P-P 邊：共享接觸點的病人兩兩相連
-        const ppEdges = [];
-        for (const [contactKey, set] of Object.entries(contactToPatients)) {
-          const arr = Array.from(set);
-          for (let i = 0; i < arr.length; i++) {
-            for (let j = i + 1; j < arr.length; j++) {
-              const a = arr[i];
-              const b = arr[j];
-              if (a === b) continue;
-              const pid1 = a < b ? a : b;
-              const pid2 = a < b ? b : a;
-              const key = pid1 + "|" + pid2;
-              if (ppEdgeSet.has(key)) continue;
-              ppEdgeSet.add(key);
-              ppEdges.push({
-                from: "p-" + pid1,
-                to: "p-" + pid2,
+        // 先計算每個病人「全體 MDRO 中的最早檢出時間」
+        const patientEarliest = {};
+        for (const c of cases) {
+          if (!c.effective) continue;
+          if (!patientEarliest[c.patientId] || c.effective < patientEarliest[c.patientId]) {
+            patientEarliest[c.patientId] = c.effective;
+          }
+        }
+
+        // 分群：groupKey = wardName + '|' + organismId
+        const groupMap = {};
+        for (const c of cases) {
+          const gKey = `${c.wardName}||${c.organismId}`;
+          if (!groupMap[gKey]) groupMap[gKey] = [];
+          groupMap[gKey].push(c);
+        }
+
+        // 病人節點暫存
+        const patientNodeMap = {};
+        const edges = [];
+        const edgeKeySet = new Set();
+
+        // 全域排序，決定 No.1, No.2...
+        const allPatientIds = Object.keys(patientEarliest);
+        allPatientIds.sort((a, b) => {
+          const da = patientEarliest[a];
+          const db = patientEarliest[b];
+          if (da && db && da.getTime() !== db.getTime()) {
+            return da - db;
+          }
+          return a.localeCompare(b);
+        });
+
+        const patientNoMap = {};
+        allPatientIds.forEach((pid, idx) => {
+          patientNoMap[pid] = idx + 1;
+        });
+
+        // 建立節點
+        for (const pid of allPatientIds) {
+          const pRes = patientsById[pid];
+          let nameFull = "";
+          if (pRes && Array.isArray(pRes.name) && pRes.name[0]) {
+            const n = pRes.name[0];
+            const full =
+              n.text ||
+              `${n.family || ""}${(n.given || []).join("")}`.trim();
+            nameFull = full || "";
+          }
+
+          const label =
+            `No.${patientNoMap[pid]} ` +
+            (maskName(nameFull) || shortId(pid) || "未知病人");
+
+          patientNodeMap[pid] = {
+            id: "p-" + pid,
+            label,
+            earliest: patientEarliest[pid],
+          };
+        }
+
+        // 每一個 group 裡面，照時間排序後連線
+        for (const [gKey, groupCases] of Object.entries(groupMap)) {
+          if (!groupCases.length) continue;
+
+          // 解析 groupKey
+          const [wardName, organismId] = gKey.split("||");
+          const organismOption =
+            BACTERIA_OPTIONS.find((x) => x.id === organismId) || null;
+
+          // 對 group 內的個案照 effective 時間排序
+          const sorted = groupCases
+            .filter((c) => !!c.effective)
+            .slice()
+            .sort((a, b) => a.effective - b.effective);
+
+          // 同一 group 中，為了避免同病人多次檢驗太雜亂，只抓「此 group 中該病人的最早檢驗時間」
+          const groupPatientEarliest = {};
+          for (const c of sorted) {
+            if (!groupPatientEarliest[c.patientId]) {
+              groupPatientEarliest[c.patientId] = c;
+            }
+          }
+
+          const groupPatients = Object.values(groupPatientEarliest).sort(
+            (a, b) => a.effective - b.effective
+          );
+
+          for (let i = 0; i < groupPatients.length; i++) {
+            for (let j = i + 1; j < groupPatients.length; j++) {
+              const src = groupPatients[i];
+              const tgt = groupPatients[j];
+              if (src.patientId === tgt.patientId) continue;
+
+              const fromId = "p-" + src.patientId;
+              const toId = "p-" + tgt.patientId;
+
+              // 若有 patientFilterId，要求邊端至少有一端是該病人
+              if (patientFilterId) {
+                if (
+                  src.patientId !== patientFilterId &&
+                  tgt.patientId !== patientFilterId
+                ) {
+                  continue;
+                }
+              }
+
+              const ek = `${fromId}|${toId}|${organismId}`;
+              if (edgeKeySet.has(ek)) continue;
+              edgeKeySet.add(ek);
+
+              const label =
+                (organismOption ? organismOption.label : organismId) +
+                " / " +
+                wardName;
+
+              edges.push({
+                data: {
+                  id: "e-" + ek.replace(/\|/g, "_"),
+                  source: fromId,
+                  target: toId,
+                  type: "pp",
+                  label,
+                },
               });
             }
           }
         }
 
+        // 若有 patientFilterId，沒有出現在任何邊中，仍然要顯示他的節點
         const elements = [];
-
-        // 病人節點
         Object.values(patientNodeMap).forEach((p) => {
-          elements.push({
-            data: {
-              id: p.id,
-              label: p.label,
-              type: "patient",
-            },
-          });
+          if (!patientFilterId || p.id === "p-" + patientFilterId) {
+            elements.push({
+              data: {
+                id: p.id,
+                label: p.label,
+                type: "patient",
+              },
+            });
+          } else {
+            // 有 filter 的情況下：節點需要至少連到一條邊才畫，避免整張圖只剩一堆孤點
+            const hasEdge =
+              edges.some((e) => e.data.source === p.id || e.data.target === p.id);
+            if (hasEdge) {
+              elements.push({
+                data: {
+                  id: p.id,
+                  label: p.label,
+                  type: "patient",
+                },
+              });
+            }
+          }
         });
 
-        // 接觸點節點
-        Object.values(contactNodeMap).forEach((c) => {
-          elements.push({
-            data: {
-              id: c.id,
-              label: c.label,
-              type: "contact",
-            },
-          });
-        });
+        elements.push(...edges);
 
-        // P-C 邊
-        pcEdges.forEach((e, idx) => {
-          const pNode = patientNodeMap[e.patientId];
-          const cNode = contactNodeMap[e.contactKey];
-          if (!pNode || !cNode) return;
-          elements.push({
-            data: {
-              id: "pc-" + idx,
-              source: pNode.id,
-              target: cNode.id,
-              type: "pc",
-            },
-          });
-        });
-
-        // P-P 邊
-        ppEdges.forEach((e, idx) => {
-          elements.push({
-            data: {
-              id: "pp-" + idx,
-              source: e.from,
-              target: e.to,
-              type: "pp",
-            },
-          });
-        });
+        const patientCount = elements.filter((el) => el.data.type === "patient").length;
+        const edgeCount = edges.length;
 
         return {
           elements,
-          patientCount: Object.keys(patientNodeMap).length,
-          contactCount: Object.keys(contactNodeMap).length,
-          pcCount: pcEdges.length,
-          ppCount: ppEdges.length,
+          patientCount,
+          edgeCount,
         };
       }
 
@@ -660,38 +637,19 @@
               },
             },
             {
-              selector: "node[type = 'contact']",
-              style: {
-                "background-color": "#aecbfa",
-                "border-color": "#042433",
-                "border-width": 1,
-                label: "data(label)",
-                "text-valign": "center",
-                "text-halign": "center",
-                "text-wrap": "wrap",
-                "font-size": 9,
-                shape: "round-rectangle",
-                padding: "4px",
-              },
-            },
-            {
-              selector: "edge[type = 'pc']",
-              style: {
-                "line-style": "dotted",
-                "line-color": "#7a7a7a",
-                "target-arrow-shape": "none",
-                width: 1,
-              },
-            },
-            {
               selector: "edge[type = 'pp']",
               style: {
                 "line-style": "solid",
                 "line-color": "#7a7a7a",
                 "target-arrow-shape": "triangle",
                 "target-arrow-color": "#7a7a7a",
-                "curve-style": "straight",
+                "curve-style": "bezier",
                 width: 2,
+                label: "data(label)",
+                "font-size": 8,
+                "text-background-color": "#ffffff",
+                "text-background-opacity": 0.7,
+                "text-background-padding": 1,
               },
             },
             {
@@ -716,7 +674,6 @@
           },
         });
 
-        // 點病人節點時 highlight 相關
         cy.on("tap", "node[type = 'patient']", (evt) => {
           const node = evt.target;
           cy.elements().removeClass("dim");
@@ -724,7 +681,6 @@
           cy.elements().difference(neighborhood).addClass("dim");
         });
 
-        // 點空白還原
         cy.on("tap", (evt) => {
           if (evt.target === cy) {
             cy.elements().removeClass("dim");
@@ -742,41 +698,40 @@
           const reloadBtn = document.getElementById("btn-reload-graph");
           const clearBtn = document.getElementById("btn-clear-debug");
           const selOrganism = document.getElementById("sel-organism");
-          const txtPatientId = document.getElementById("txt-patient-id");
+          const txtPatientFilter = document.getElementById("txt-patient-filter");
 
           async function reloadGraph() {
             const opt = getSelectedBacteriaOption();
-            const manualPid = (txtPatientId.value || "").trim();
-            const pidDesc = manualPid ? `，指定病人：${manualPid}` : "";
+            const filterId = (txtPatientFilter.value || "").trim();
 
             reloadBtn.disabled = true;
             document.getElementById("graph-stats").textContent =
-              `從 FHIR 讀取資料並重建傳播鏈中...（最多 20 筆 Observation，菌種：${opt.label}${pidDesc}）`;
+              `從 FHIR 讀取資料並重建傳播鏈中...（最多 50 筆 Observation，菌種：${opt.label}${
+                filterId ? `，僅顯示與 Patient/${filterId} 相關邊` : ""
+              }）`;
 
             try {
               const { cases, patientsById } = await buildTransmissionData(
                 client,
                 opt,
-                manualPid || null
+                filterId || null
               );
               if (!cases.length) {
                 renderGraph(
                   [],
-                  `查無符合條件的抗藥菌 Observation（菌種：${opt.label}${pidDesc}），無法建立傳播鏈。`
+                  `查無符合條件的抗藥菌 Observation（菌種：${opt.label}），無法建立傳播鏈。`
                 );
                 reloadBtn.disabled = false;
                 return;
               }
 
-              const {
-                elements,
-                patientCount,
-                contactCount,
-                pcCount,
-                ppCount,
-              } = buildGraphElementsFromCases(cases, patientsById);
+              const { elements, patientCount, edgeCount } =
+                buildGraphElementsFromCases(cases, patientsById, filterId || null);
 
-              const statsText = `節點：病人 ${patientCount} 人、接觸點 ${contactCount} 個；邊：病人-接觸點 ${pcCount} 條、病人-病人 ${ppCount} 條。（菌種：${opt.label}，基於最多 20 筆 Observation${pidDesc}）`;
+              const statsText = `節點：病人 ${patientCount} 人；邊：病人 → 病人 ${edgeCount} 條。` +
+                `（菌種：${opt.label}，最多 50 筆 Observation${
+                  filterId ? `，與 Patient/${filterId} 相關` : ""
+                }）`;
               renderGraph(elements, statsText);
             } catch (err) {
               console.error(err);
@@ -792,20 +747,13 @@
           // 初次載入
           await reloadGraph();
 
-          // 綁定事件
           reloadBtn.addEventListener("click", reloadGraph);
           clearBtn.addEventListener("click", () => {
             document.getElementById("debug-log").textContent =
               "// 已清除訊息，可重新操作。";
           });
           selOrganism.addEventListener("change", reloadGraph);
-
-          // 在 PatientID 輸入框按 Enter 也重載
-          txtPatientId.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-              reloadGraph();
-            }
-          });
+          txtPatientFilter.addEventListener("change", reloadGraph);
         })
         .catch((err) => {
           console.error("SMART 初始化失敗", err);
