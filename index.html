@@ -1,279 +1,435 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
-  <head>
+<head>
     <meta charset="UTF-8" />
-    <title>疫調傳播鏈 (精準多段式查詢版)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>醫院感染傳播鏈分析系統 (MDRO Tracer)</title>
+    
     <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
     <script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
+    
     <style>
-      body { font-family: "Microsoft JhengHei", sans-serif; background: #f0f2f5; padding: 20px; }
-      .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-      h1 { color: #2c3e50; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-      .controls { background: #e8f4fd; padding: 20px; border-radius: 6px; margin-bottom: 20px; border-left: 5px solid #1a73e8; }
-      .step { margin-bottom: 10px; font-size: 0.95rem; color: #555; }
-      #cy { width: 100%; height: 600px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
-      button { background: #1a73e8; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1rem; }
-      button:hover { background: #1557b0; }
-      button:disabled { background: #ccc; cursor: not-allowed; }
-      #status { font-weight: bold; color: #d93025; display: block; margin-top: 10px; }
-      #debug { background: #222; color: #0f0; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 20px; border-radius: 4px; }
-      .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; background: #ddd; font-size: 0.8em; margin-right: 5px; }
+        :root {
+            --primary: #2c3e50;
+            --accent: #3498db;
+            --danger: #e74c3c;
+            --success: #2ecc71;
+            --bg: #f8f9fa;
+            --card-bg: #ffffff;
+        }
+
+        body { font-family: "Segoe UI", "Microsoft JhengHei", sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1280px; margin: 0 auto; display: grid; grid-template-rows: auto auto 1fr; gap: 20px; height: 95vh; }
+        
+        /* 標題區 */
+        header { background: var(--card-bg); padding: 15px 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 1.5rem; color: var(--primary); display: flex; align-items: center; gap: 10px; }
+        .badge { background: var(--accent); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; vertical-align: middle; }
+
+        /* 控制面板 */
+        .controls { background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
+        
+        .input-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-weight: 600; font-size: 0.9rem; color: #555; }
+        input, select { padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 1rem; outline: none; transition: border 0.3s; }
+        input:focus, select:focus { border-color: var(--accent); }
+        
+        button { background: var(--accent); color: white; border: none; padding: 10px 25px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: transform 0.1s, background 0.3s; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+        button:hover { background: #2980b9; transform: translateY(-1px); }
+        button:active { transform: translateY(1px); }
+        button:disabled { background: #bdc3c7; cursor: not-allowed; transform: none; }
+
+        /* 主畫面佈局 */
+        .main-content { display: grid; grid-template-columns: 3fr 1fr; gap: 20px; min-height: 500px; }
+        
+        /* 圖表區 */
+        #cy-container { background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); position: relative; overflow: hidden; border: 1px solid #eee; }
+        #cy { width: 100%; height: 100%; }
+        
+        /* 狀態與日誌區 */
+        .sidebar { display: flex; flex-direction: column; gap: 20px; }
+        .status-card { background: var(--card-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .status-title { font-weight: bold; margin-bottom: 10px; display: block; border-bottom: 2px solid #f0f0f0; padding-bottom: 5px; }
+        
+        #log-window { background: #1e1e1e; color: #a9b7c6; padding: 15px; border-radius: 8px; height: 100%; overflow-y: auto; font-family: "Consolas", monospace; font-size: 0.85rem; line-height: 1.4; max-height: 600px; }
+        .log-time { color: #808080; margin-right: 8px; }
+        .log-info { color: #6a8759; }
+        .log-warn { color: #cc7832; }
+        .log-error { color: #ff6b68; font-weight: bold; }
+        .log-highlight { color: #6897bb; font-weight: bold; }
+
+        /* 讀取動畫 */
+        .loader { border: 3px solid #f3f3f3; border-top: 3px solid var(--accent); border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: none; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
     </style>
-  </head>
-  <body>
+</head>
+<body>
+
     <div class="container">
-      <h1>🏥 院內感染精準疫調 (Location-Based)</h1>
-      
-      <div class="controls">
-        <div class="step">
-          <b>查詢邏輯：</b> 鎖定病人 ID ➔ 找出住院病房 ID ➔ 抓取該病房所有接觸者 ➔ 篩選抗藥菌
-        </div>
-        <div style="margin-top: 15px;">
-          <label><b>Step 1.</b> 核心病人 ID：</label>
-          <input type="text" id="root-id" placeholder="例如: 669814" style="padding: 8px; width: 150px; font-size: 1rem;">
-          
-          <label style="margin-left: 15px;"><b>Step 2.</b> 菌種：</label>
-          <select id="organism" style="padding: 8px; font-size: 1rem;">
-            <option value="MRSA">MRSA</option>
-            <option value="CRAB">CRAB</option>
-            <option value="VRE">VRE</option>
-            <option value="ALL">全部顯示</option>
-          </select>
+        <header>
+            <h1>🦠 醫院感染傳播鏈分析系統 <span class="badge">FHIR R4</span></h1>
+            <div id="connection-status" style="color: gray; font-size: 0.9rem;">等待連線...</div>
+        </header>
 
-          <button id="btn-draw" style="margin-left: 15px;">🚀 開始精準查詢</button>
-        </div>
-        <span id="status"></span>
-      </div>
+        <div class="controls">
+            <div class="input-group">
+                <label>核心病人 ID (Index Patient)</label>
+                <input type="text" id="root-id" placeholder="例如: 669814" style="width: 180px;">
+            </div>
+            
+            <div class="input-group">
+                <label>目標菌種 (Target Organism)</label>
+                <select id="organism" style="width: 200px;">
+                    <option value="MRSA">MRSA (Staphylococcus aureus)</option>
+                    <option value="CRAB">CRAB (Acinetobacter baumannii)</option>
+                    <option value="VRE">VRE (Enterococcus faecium)</option>
+                    <option value="ALL">全部顯示 (All MDROs)</option>
+                </select>
+            </div>
 
-      <div id="cy"></div>
-      <div id="debug">系統準備就緒...</div>
+            <div style="align-self: flex-end;">
+                <button id="btn-draw" onclick="runAnalysis()">
+                    <div class="loader" id="btn-loader"></div>
+                    <span>開始分析傳播鏈</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div id="cy-container">
+                <div id="cy"></div>
+                <div style="position: absolute; bottom: 10px; right: 10px; background: rgba(255,255,255,0.9); padding: 10px; border-radius: 8px; font-size: 0.8rem; pointer-events: none;">
+                    <span style="color:#e74c3c;">●</span> 核心病人 &nbsp; 
+                    <span style="color:#3498db;">■</span> 接觸者/室友
+                </div>
+            </div>
+
+            <div class="sidebar">
+                <div class="status-card">
+                    <span class="status-title">分析狀態</span>
+                    <div id="status-text" style="color: #666;">系統準備就緒，請輸入 ID 開始查詢。</div>
+                </div>
+                <div id="log-window">
+                    <div>系統啟動...</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
-      function log(msg) {
-        const d = document.getElementById("debug");
-        d.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
-        d.scrollTop = d.scrollHeight;
-      }
+        // --- 系統全域變數 ---
+        let fhirClient = null;
+        let cy = null;
 
-      async function run() {
-        const btn = document.getElementById("btn-draw");
-        const status = document.getElementById("status");
-        const rootId = document.getElementById("root-id").value.trim();
-        const orgType = document.getElementById("organism").value;
-
-        if (!rootId) { alert("請先輸入病人 ID"); return; }
-
-        // 重置狀態
-        btn.disabled = true;
-        document.getElementById("status").textContent = "";
-        document.getElementById("debug").innerHTML = ""; // 清空 Log
-        
-        try {
-            const client = await FHIR.oauth2.ready();
+        // --- 工具函式：日誌記錄 ---
+        function log(msg, type = 'info') {
+            const logWin = document.getElementById("log-window");
+            const time = new Date().toLocaleTimeString();
+            const div = document.createElement("div");
             
-            // --- 第一段：查該病人是否存在 ---
-            status.textContent = "🔍 階段 1/3: 確認病人與住院紀錄...";
-            log(`正在查詢 Patient/${rootId}...`);
-            
-            // 同時抓 Patient 與他的 Encounter
-            const patientData = await client.request(`Patient/${rootId}`);
-            log(`✅ 找到病人: ${patientData.name?.[0]?.text}`);
+            let typeClass = "log-info";
+            if(type === 'error') typeClass = "log-error";
+            if(type === 'warn') typeClass = "log-warn";
+            if(type === 'highlight') typeClass = "log-highlight";
 
-            const encounterBundle = await client.request(`Encounter?subject=${rootId}&_include=Encounter:location`, { flat: false });
+            div.innerHTML = `<span class="log-time">[${time}]</span> <span class="${typeClass}">${msg}</span>`;
+            logWin.appendChild(div);
+            logWin.scrollTop = logWin.scrollHeight;
+        }
+
+        // --- 工具函式：ID 解析 ---
+        function cleanId(reference) {
+            if (!reference) return null;
+            return reference.includes('/') ? reference.split('/').pop() : reference;
+        }
+
+        // --- 初始化 FHIR Client ---
+        FHIR.oauth2.ready().then(client => {
+            fhirClient = client;
+            document.getElementById("connection-status").innerHTML = `✅ 已連線至: ${client.state.serverUrl}`;
+            document.getElementById("connection-status").style.color = "green";
+            log("FHIR Client 初始化成功", "highlight");
             
-            if (!encounterBundle.entry || encounterBundle.entry.length === 0) {
-                throw new Error("此病人沒有任何 Encounter (住院) 紀錄，無法追蹤病房。");
+            // 如果 Launch Context 有病人 ID，自動填入
+            if (client.patient.id) {
+                document.getElementById("root-id").value = client.patient.id;
+                log(`偵測到 Context 病人 ID: ${client.patient.id}`);
             }
+        }).catch(err => {
+            document.getElementById("connection-status").innerHTML = `❌ 連線失敗`;
+            document.getElementById("connection-status").style.color = "red";
+            log(`FHIR 初始化失敗: ${err}`, "error");
+        });
 
-            // --- 第二段：找出他住過的病房 (Location ID) ---
-            const targetLocations = new Set();
-            const locationMap = {}; // ID -> Name
+        // --- 核心分析邏輯 ---
+        async function runAnalysis() {
+            const rootId = document.getElementById("root-id").value.trim();
+            const orgType = document.getElementById("organism").value;
+            const btn = document.getElementById("btn-draw");
+            const loader = document.getElementById("btn-loader");
+            const statusText = document.getElementById("status-text");
 
-            encounterBundle.entry.forEach(e => {
-                const res = e.resource;
-                if (res.resourceType === "Location") {
-                    locationMap[res.id] = res.name;
-                }
-                if (res.resourceType === "Encounter" && res.location) {
-                    res.location.forEach(locWrapper => {
-                        const ref = locWrapper.location?.reference;
-                        if (ref) {
-                            const locId = ref.split("/").pop();
-                            targetLocations.add(locId);
-                            // 如果 bundle 沒帶回 location resource，試著用 display
-                            if (!locationMap[locId] && locWrapper.location.display) {
-                                locationMap[locId] = locWrapper.location.display;
-                            }
-                        }
-                    });
-                }
-            });
-
-            if (targetLocations.size === 0) {
-                throw new Error("此病人的住院紀錄中沒有 Location (病房) 資訊，無法追蹤。");
+            if (!rootId) {
+                alert("請輸入病人 ID！");
+                return;
             }
-
-            const locIds = Array.from(targetLocations);
-            log(`✅ 鎖定病房 ID: ${locIds.join(", ")}`);
-            locIds.forEach(id => log(`   📍 病房名稱: ${locationMap[id] || "未知"}`));
-
-            // --- 第三段：精準撈取這些病房的所有人 ---
-            status.textContent = `🔍 階段 2/3: 正在掃描 ${locIds.length} 個病房內的所有接觸者...`;
-            
-            // 這裡使用 _revinclude 和 _include 的組合技
-            // Encounter?location=... 
-            // &_include=Encounter:subject (順便把病人個資抓回來)
-            // &_revinclude=Observation:encounter (順便把檢驗報告抓回來)
-            
-            const promises = locIds.map(locId => {
-                const query = `Encounter?location=${locId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=200`;
-                log(`   👉 發送查詢: ${query}`);
-                return client.request(query, { flat: false });
-            });
-
-            const results = await Promise.all(promises);
-            
-            // --- 資料彙整 ---
-            status.textContent = "🔍 階段 3/3: 分析傳播路徑與繪圖...";
-            
-            const allResources = [];
-            const processedIds = new Set();
-
-            results.forEach(bundle => {
-                if(bundle.entry) {
-                    bundle.entry.forEach(e => {
-                        if(!processedIds.has(e.resource.id)) {
-                            processedIds.add(e.resource.id);
-                            allResources.push(e.resource);
-                        }
-                    });
-                }
-            });
-
-            log(`📦 共取得 ${allResources.length} 筆相關資料 (包含室友、檢驗報告)`);
-
-            // 建立快速索引
-            const patIndex = {};
-            const obsList = [];
-            
-            allResources.forEach(r => {
-                if(r.resourceType === "Patient") patIndex[r.id] = r;
-                if(r.resourceType === "Observation") obsList.push(r);
-            });
-
-            // --- 建立圖表節點 ---
-            const nodes = new Map();
-            const links = [];
-
-            obsList.forEach(obs => {
-                // 1. 篩選菌種
-                const raw = JSON.stringify(obs).toLowerCase();
-                if (orgType !== "ALL" && !raw.includes(orgType.toLowerCase())) return;
-
-                // 2. 取得病人資訊
-                const patRef = obs.subject?.reference || "";
-                const patId = patRef.split("/").pop();
-                const patient = patIndex[patId];
-                if (!patient) return; // 有 Observation 但沒抓到 Patient Resource (罕見)
-
-                const name = patient.name?.[0]?.text || "Unknown";
-                
-                // 3. 取得日期與地點 (從 Observation 或關聯的 Encounter 推算)
-                // 因為我們是用 Location 查回來的，所以這裡一定是在目標病房內
-                const date = obs.effectiveDateTime ? obs.effectiveDateTime.substring(0, 10) : "無日期";
-                
-                // 這裡簡化：既然是用 LocID 查回來的，我們就直接標示該 LocID 對應的名稱
-                // 若要更精準，應該比對 Observation -> Encounter -> Location
-                const encRef = obs.encounter?.reference || "";
-                const encId = encRef.split("/").pop();
-                // 這裡做個簡單判斷，如果這個 Observation 屬於我們查回來的 Encounter 之一
-                
-                // 為了 Demo 方便，我們先假設只要在這批資料裡，就是相關的
-                // 實際顯示病房名稱
-                let displayWard = "隔離病房"; 
-                // 嘗試找回這是哪個 Location
-                // (省略複雜反查，直接用我們鎖定的 LocationMap)
-                const matchedLocId = locIds.find(lid => JSON.stringify(allResources).includes(lid)); 
-                if(matchedLocId) displayWard = locationMap[matchedLocId] || "目標病房";
-
-                nodes.set(patId, { id: patId, name, ward: displayWard, date, organism: orgType });
-                
-                if(patId === rootId) {
-                    log(`🎯 核心病人資料確認: ${date} / ${displayWard}`);
-                }
-            });
-
-            if(nodes.size === 0) {
-                status.textContent = "❌ 找不到符合條件的抗藥菌案例 (可能該病房無人感染或菌種不符)";
-                btn.disabled = false;
+            if (!fhirClient) {
+                alert("FHIR Client 尚未連線，請檢查環境。");
                 return;
             }
 
-            log(`篩選後共 ${nodes.size} 位病人`);
+            // UI 狀態重置
+            btn.disabled = true;
+            loader.style.display = "inline-block";
+            document.getElementById("log-window").innerHTML = ""; // 清空舊 log
+            log(`🚀 開始分析病人: ${rootId}, 菌種: ${orgType}`, "highlight");
 
-            // --- 建立連線 (只要是同一天、同一病房) ---
-            const nodeList = Array.from(nodes.values());
-            for(let i=0; i<nodeList.length; i++) {
-                for(let j=i+1; j<nodeList.length; j++) {
-                    const a = nodeList[i];
-                    const b = nodeList[j];
+            try {
+                // 1. 查詢核心病人與住院紀錄
+                statusText.textContent = "階段 1/3: 查詢病人住院史...";
+                
+                // 並行查詢病人資料與 Encounter
+                const [patientRes, encounterBundle] = await Promise.all([
+                    fhirClient.request(`Patient/${rootId}`).catch(() => null),
+                    fhirClient.request(`Encounter?subject=${rootId}&_include=Encounter:location`, { flat: false })
+                ]);
+
+                if (!patientRes) throw new Error("找不到該病人 ID");
+                const rootName = patientRes.name?.[0]?.text || 
+                               (patientRes.name?.[0]?.family + patientRes.name?.[0]?.given?.join("")) || "Unknown";
+                log(`✅ 確認病人: ${rootName}`);
+
+                if (!encounterBundle.entry || encounterBundle.entry.length === 0) {
+                    throw new Error("此病人沒有任何住院紀錄 (Encounter)，無法追蹤接觸者。");
+                }
+
+                // 2. 提取住過的病房 (Location)
+                const locationMap = new Map(); // ID -> Name
+                const targetLocIds = new Set();
+
+                encounterBundle.entry.forEach(e => {
+                    const res = e.resource;
+                    // 建立 Location 參照表
+                    if (res.resourceType === "Location") {
+                        locationMap.set(res.id, res.name || res.alias?.[0] || "未知病房");
+                    }
+                    // 解析 Encounter 中的 Location
+                    if (res.resourceType === "Encounter" && res.location) {
+                        res.location.forEach(locWrapper => {
+                            const ref = locWrapper.location?.reference;
+                            const display = locWrapper.location?.display;
+                            if (ref) {
+                                const id = cleanId(ref);
+                                targetLocIds.add(id);
+                                if (!locationMap.has(id) && display) {
+                                    locationMap.set(id, display);
+                                }
+                            }
+                        });
+                    }
+                });
+
+                if (targetLocIds.size === 0) throw new Error("住院紀錄中未包含病房 (Location) 資訊。");
+                
+                const locIdsArr = Array.from(targetLocIds);
+                log(`📍 鎖定 ${locIdsArr.length} 個相關病房: ${Array.from(locationMap.values()).join(", ")}`);
+
+                // 3. 反查這些病房的所有接觸者 (Magic Query)
+                statusText.textContent = `階段 2/3: 掃描 ${locIdsArr.length} 個病房的接觸者...`;
+                
+                // 使用 Promise.all 並行查詢所有病房
+                const queryPromises = locIdsArr.map(locId => {
+                    // 關鍵查詢：Encounter + Patient + Observation (一次抓回)
+                    const q = `Encounter?location=${locId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=300`;
+                    log(`🔍 掃描病房 ${locationMap.get(locId) || locId}...`);
+                    return fhirClient.request(q, { flat: false });
+                });
+
+                const bundles = await Promise.all(queryPromises);
+
+                // 4. 資料處理與過濾
+                statusText.textContent = "階段 3/3: 建構傳播網路...";
+                
+                const nodes = new Map(); // ID -> NodeData
+                const edges = new Set(); // "source-target" string to avoid duplicates
+
+                // 建立全域索引
+                const allPatients = new Map();
+                const allObs = [];
+
+                bundles.forEach(b => {
+                    if (!b.entry) return;
+                    b.entry.forEach(e => {
+                        const r = e.resource;
+                        if (r.resourceType === "Patient") allPatients.set(r.id, r);
+                        if (r.resourceType === "Observation") allObs.push(r);
+                    });
+                });
+
+                log(`📦 原始資料: ${allPatients.size} 位病人, ${allObs.length} 份報告`);
+
+                // 分析 Observation
+                allObs.forEach(obs => {
+                    // 4.1 菌種過濾
+                    const rawText = JSON.stringify(obs).toLowerCase();
+                    if (orgType !== "ALL" && !rawText.includes(orgType.toLowerCase())) return;
+
+                    // 4.2 取得病人 ID
+                    const patId = cleanId(obs.subject?.reference);
+                    if (!patId || !allPatients.has(patId)) return;
+
+                    // 4.3 建立節點資料
+                    const patient = allPatients.get(patId);
+                    // 組合姓名：優先使用 text，否則用 family+given
+                    let name = patient.name?.[0]?.text;
+                    if (!name && patient.name?.[0]) {
+                        name = (patient.name[0].family || "") + (patient.name[0].given?.join("") || "");
+                    }
+                    name = name || "Unknown";
+
+                    const date = obs.effectiveDateTime ? obs.effectiveDateTime.substring(0, 10) : "無日期";
                     
-                    // 這裡判定非常寬鬆：因為我們已經是用 Location 去 Query 了
-                    // 所以只要日期一樣，他們就一定是室友
-                    if(a.date === b.date) {
-                        links.push({ source: a.id, target: b.id });
+                    // 嘗試找出這份報告對應的病房名稱
+                    // 這裡簡化邏輯：如果這個 Observation 屬於我們查回來的 Encounter，就標記該 Encounter 的 Location
+                    // 實務上可以直接標示 "相關接觸者"
+                    
+                    nodes.set(patId, {
+                        id: patId,
+                        name: name,
+                        date: date,
+                        isRoot: patId === rootId
+                    });
+                });
+
+                if (nodes.size === 0) {
+                    log("❌ 篩選後無符合資料", "warn");
+                    statusText.textContent = "查無符合條件的接觸者";
+                    drawGraph([], []); // 清空圖表
+                    return;
+                }
+
+                // 4.4 建立連線 (只要日期相同且都在這批 Location 撈回來的清單中，視為接觸)
+                const nodeList = Array.from(nodes.values());
+                
+                for (let i = 0; i < nodeList.length; i++) {
+                    for (let j = i + 1; j < nodeList.length; j++) {
+                        const a = nodeList[i];
+                        const b = nodeList[j];
+                        
+                        // 判定邏輯：日期相同 (因為我們已經限定是同病房的查詢結果了)
+                        if (a.date === b.date && a.date !== "無日期") {
+                            // 確保連線方向一致 (避免重複)
+                            edges.add(`${a.id}|${b.id}`); 
+                        }
                     }
                 }
+
+                log(`📊 分析完成: ${nodes.size} 個節點, ${edges.size} 條連線`, "highlight");
+                statusText.textContent = `分析完成！共 ${nodes.size} 人`;
+
+                // 5. 繪製圖表
+                drawGraph(nodeList, Array.from(edges));
+
+            } catch (err) {
+                console.error(err);
+                log(`錯誤: ${err.message}`, "error");
+                statusText.textContent = "發生錯誤，請查看日誌";
+                alert("分析過程發生錯誤：" + err.message);
+            } finally {
+                btn.disabled = false;
+                loader.style.display = "none";
             }
-
-            status.textContent = `繪製完成：${nodes.size} 人, ${links.length} 條連結`;
-            renderCy(Array.from(nodes.values()), links, rootId);
-
-        } catch (err) {
-            console.error(err);
-            log("❌ 錯誤: " + err.message);
-            status.textContent = "發生錯誤，請看 Log";
-        } finally {
-            btn.disabled = false;
         }
-      }
 
-      function renderCy(nodes, links, rootId) {
-          const elements = [];
-          nodes.forEach(n => {
-              elements.push({
-                  data: {
-                      id: n.id,
-                      label: `${n.name}\n${n.date}`,
-                      color: n.id === rootId ? "#d93025" : "#1a73e8" // Root 紅色，其他藍色
-                  }
-              });
-          });
-          links.forEach((l, i) => {
-              elements.push({ data: { id: 'e'+i, source: l.source, target: l.target } });
-          });
+        // --- Cytoscape 繪圖邏輯 ---
+        function drawGraph(nodeList, edgeList) {
+            const elements = [];
 
-          cytoscape({
-              container: document.getElementById('cy'),
-              elements: elements,
-              style: [
-                  { selector: 'node', style: { 
-                      'background-color': 'data(color)', 
-                      'label': 'data(label)', 
-                      'color': '#333', 
-                      'text-wrap': 'wrap', 
-                      'text-valign': 'center',
-                      'font-size': '11px',
-                      'width': 60, 'height': 60 
-                  }},
-                  { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } }
-              ],
-              layout: { name: 'cose', animate: false, padding: 50 }
-          });
-      }
+            // 轉換節點
+            nodeList.forEach(n => {
+                elements.push({
+                    data: {
+                        id: n.id,
+                        label: `${n.name}\n${n.date}`,
+                        type: n.isRoot ? 'root' : 'contact'
+                    }
+                });
+            });
 
-      document.getElementById("btn-draw").addEventListener("click", run);
+            // 轉換連線
+            edgeList.forEach((edgeStr, index) => {
+                const [source, target] = edgeStr.split('|');
+                elements.push({
+                    data: {
+                        id: 'e' + index,
+                        source: source,
+                        target: target
+                    }
+                });
+            });
+
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                elements: elements,
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(label)',
+                            'text-wrap': 'wrap',
+                            'text-valign': 'center',
+                            'text-halign': 'center',
+                            'font-size': '12px',
+                            'color': '#fff',
+                            'border-width': 2,
+                            'border-color': '#2c3e50'
+                        }
+                    },
+                    {
+                        selector: 'node[type="root"]',
+                        style: {
+                            'background-color': '#e74c3c', // 紅色圓形
+                            'shape': 'ellipse',
+                            'width': 70,
+                            'height': 70,
+                            'font-weight': 'bold'
+                        }
+                    },
+                    {
+                        selector: 'node[type="contact"]',
+                        style: {
+                            'background-color': '#3498db', // 藍色方形
+                            'shape': 'round-rectangle',
+                            'width': 65,
+                            'height': 65
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 3,
+                            'line-color': '#95a5a6',
+                            'curve-style': 'bezier'
+                        }
+                    }
+                ],
+                // 使用 cose 佈局演算法，讓圖形自動散開
+                layout: {
+                    name: 'cose',
+                    animate: true,
+                    padding: 50,
+                    nodeRepulsion: 4500,
+                    idealEdgeLength: 100
+                }
+            });
+
+            // 點擊事件
+            cy.on('tap', 'node', function(evt){
+                const node = evt.target;
+                log(`點擊節點: ${node.data('label').replace('\n', ', ')}`);
+            });
+        }
     </script>
-  </body>
+</body>
 </html>
