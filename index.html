@@ -2,142 +2,224 @@
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8" />
-    <title>傳播鏈分析 (邏輯修正版)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>精準傳播鏈 (時間重疊判定版)</title>
     <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
     <script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
     <style>
         body { font-family: "Microsoft JhengHei", sans-serif; background: #f4f6f8; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        .controls { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
-        #cy { width: 100%; height: 600px; border: 1px solid #ddd; background: #fff; border-radius: 4px; }
-        button { background: #1976d2; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; }
-        button:disabled { background: #ccc; }
-        .legend { margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 4px; font-size: 0.9rem; }
+        .container { max-width: 1280px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 0; }
+        .controls { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        #cy { width: 100%; height: 650px; border: 1px solid #ddd; background: #fff; border-radius: 4px; }
+        button { background: #1976d2; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1rem; }
+        button:disabled { background: #cfd8dc; color: #90a4ae; cursor: not-allowed; }
+        select, input { padding: 8px; border-radius: 4px; border: 1px solid #ccc; font-size: 1rem; }
+        .legend { margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 4px; font-size: 0.9rem; line-height: 1.8; }
+        .dot { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: middle; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>🦠 傳播路徑分析 (嚴格連線版)</h2>
+        <h1>🏥 院內感染傳播鏈 (Time Overlap Logic)</h1>
+        
         <div class="controls">
             <label>核心病人 ID：</label>
-            <input type="text" id="root-id" placeholder="輸入 ID" style="padding: 8px;">
-            <label>菌種：</label>
-            <select id="organism" style="padding: 8px;">
-                <option value="MRSA">MRSA</option>
-                <option value="CRAB">CRAB</option>
+            <input type="text" id="root-id" placeholder="輸入 ID (例如: 670653)" style="width: 150px;">
+            
+            <label>目標菌種：</label>
+            <select id="organism">
+                <option value="ALL">全部 (All)</option>
+                <option value="MRSA">Staphylococcus aureus (MRSA)</option>
+                <option value="CRAB">Acinetobacter baumannii (CRAB)</option>
+                <option value="VRE">Enterococcus faecium (VRE)</option>
+                <option value="CRPA">Pseudomonas aeruginosa (CRPA)</option>
+                <option value="CRE_COLI">E.coli (CR)</option>
+                <option value="CRKP">Klebsiella pneumoniae (CR)</option>
             </select>
-            <button id="btn-draw" onclick="runAnalysis()">🚀 分析傳播鏈</button>
+
+            <button id="btn-draw" onclick="runAnalysis()">🚀 開始分析</button>
             <span id="status" style="color: #d32f2f; font-weight: bold; margin-left: 10px;"></span>
         </div>
+
         <div id="cy"></div>
+        
         <div class="legend">
-            圖例：
-            <span style="color:#e74c3c">● 紅圓</span> = 感染者 &nbsp;|&nbsp; 
-            <span style="color:#3498db">■ 藍方</span> = 接觸者 &nbsp;|&nbsp; 
-            <span>➡ 實線箭頭</span> = 傳播方向 &nbsp;|&nbsp; 
-            <span style="color:#999">--- 虛線</span> = 接觸關係 (僅限感染者連出)
+            <b>圖例說明：</b><br>
+            <span class="dot" style="background:#e74c3c; border-radius:50%;"></span><b>圓形 (紅色)</b>：感染者 (Infected) - 字體黑色<br>
+            <span class="dot" style="background:#3498db;"></span><b>正方形 (藍色)</b>：接觸者 (Contact) - 字體黑色<br>
+            <b>➡ 實線箭頭</b>：感染傳播 (依照檢驗日期：先 → 後)<br>
+            <b>--- 虛線</b>：接觸關聯 (僅限感染者 → 接觸者，且必須住院時間重疊)
         </div>
     </div>
 
     <script>
         let fhirClient = null;
-        FHIR.oauth2.ready().then(c => { fhirClient = c; if(c.patient.id) document.getElementById("root-id").value = c.patient.id; });
+        let cy = null; // Cytoscape 實例
+
+        FHIR.oauth2.ready().then(c => { 
+            fhirClient = c; 
+            if(c.patient.id) document.getElementById("root-id").value = c.patient.id; 
+        });
+
+        // 菌種關鍵字對應表
+        const BUG_KEYWORDS = {
+            "MRSA": ["mrsa", "staphylococcus aureus"],
+            "CRAB": ["crab", "acinetobacter", "baumannii"],
+            "VRE": ["vre", "enterococcus", "faecium"],
+            "CRPA": ["crpa", "pseudomonas", "aeruginosa"],
+            "CRE_COLI": ["e.coli", "escherichia", "carbapenem"],
+            "CRKP": ["klebsiella", "pneumoniae", "carbapenem"]
+        };
 
         async function runAnalysis() {
             const rootId = document.getElementById("root-id").value.trim();
-            const orgType = document.getElementById("organism").value;
+            const orgSelect = document.getElementById("organism").value;
             const btn = document.getElementById("btn-draw");
             const status = document.getElementById("status");
 
-            if (!rootId) { alert("請輸入 ID"); return; }
+            if (!rootId) { alert("請輸入核心病人 ID"); return; }
             btn.disabled = true;
-            status.textContent = "🔍 掃描中...";
+            status.textContent = "🔍 1/3 分析病房與住院時間...";
 
             try {
-                // 1. 找病房
-                const encData = await fhirClient.request(`Encounter?subject=${rootId}&_include=Encounter:location`, { flat: false });
-                let locId = null;
-                if(encData.entry) {
-                    const enc = encData.entry.find(e => e.resource.resourceType === "Encounter");
-                    if(enc && enc.resource.location) locId = enc.resource.location[0].location.reference.split("/").pop();
+                // 1. 查詢核心病人住院資訊 (取得 Location 和 時間區間)
+                const encQuery = `Encounter?subject=${rootId}&_include=Encounter:location`;
+                const encBundle = await fhirClient.request(encQuery, { flat: false });
+                
+                let targetLocId = null;
+                if(encBundle.entry) {
+                    const enc = encBundle.entry.find(e => e.resource.resourceType === "Encounter");
+                    if(enc && enc.resource.location && enc.resource.location.length > 0) {
+                        const locRef = enc.resource.location[0].location.reference;
+                        targetLocId = locRef.split("/").pop();
+                    }
                 }
-                if (!locId) throw new Error("找不到住院紀錄");
 
-                // 2. 抓全病房資料
-                const query = `Encounter?location=${locId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=200`;
+                if (!targetLocId) throw new Error("找不到此病人的住院病房資訊 (Location)");
+
+                // 2. 抓取該病房「所有」相關人事物 (擴大搜尋範圍)
+                status.textContent = "🔍 2/3 掃描同病房接觸者...";
+                // 這裡我們抓 300 筆，確保包含到所有可能重疊的人
+                const query = `Encounter?location=${targetLocId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=300`;
                 const bundle = await fhirClient.request(query, { flat: false });
 
-                // 3. 解析
+                // 3. 資料解析與邏輯判斷
+                status.textContent = "🔍 3/3 計算時間重疊與傳播路徑...";
+                
                 const patients = {}; 
-                const infectedMap = {};
 
                 if (bundle.entry) {
-                    // 初始化所有病人為「接觸者 (Contact)」
+                    // Step A: 建立病人清單與住院時間
                     bundle.entry.forEach(e => {
-                        if (e.resource.resourceType === "Patient") {
-                            const p = e.resource;
-                            const name = p.name?.[0]?.text || "Unknown";
-                            patients[p.id] = { id: p.id, name: name, type: 'contact', date: null };
+                        const r = e.resource;
+                        if (r.resourceType === "Patient") {
+                            const name = r.name?.[0]?.text || "Unknown";
+                            if(!patients[r.id]) {
+                                patients[r.id] = { 
+                                    id: r.id, 
+                                    name: name, 
+                                    type: 'contact', // 預設為接觸者
+                                    obsDate: null, 
+                                    period: { start: null, end: null } 
+                                };
+                            }
                         }
                     });
 
-                    // 標記「感染者 (Infected)」
+                    // Step B: 填入 Encounter 時間 (用於接觸判定)
                     bundle.entry.forEach(e => {
-                        if (e.resource.resourceType === "Observation") {
-                            const obs = e.resource;
-                            const raw = JSON.stringify(obs).toLowerCase();
-                            if (raw.includes(orgType.toLowerCase())) {
-                                const patId = obs.subject?.reference?.split("/").pop();
+                        const r = e.resource;
+                        if (r.resourceType === "Encounter") {
+                            const patId = r.subject?.reference?.split("/").pop();
+                            if (patients[patId] && r.period) {
+                                // 儲存住院時間，若無結束時間則視為 '9999' (還在住院)
+                                patients[patId].period = {
+                                    start: new Date(r.period.start).getTime(),
+                                    end: r.period.end ? new Date(r.period.end).getTime() : 9999999999999
+                                };
+                            }
+                        }
+                    });
+
+                    // Step C: 標記感染者 (Observation)
+                    bundle.entry.forEach(e => {
+                        const r = e.resource;
+                        if (r.resourceType === "Observation") {
+                            const raw = JSON.stringify(r).toLowerCase();
+                            // 判斷菌種
+                            let isTarget = false;
+                            if (orgSelect === "ALL") {
+                                isTarget = true; // 這裡簡化，實際可能要排除非 MDRO
+                            } else {
+                                const keywords = BUG_KEYWORDS[orgSelect];
+                                if (keywords && keywords.every(k => raw.includes(k))) isTarget = true;
+                            }
+
+                            if (isTarget) {
+                                const patId = r.subject?.reference?.split("/").pop();
                                 if (patients[patId]) {
                                     patients[patId].type = 'infected';
-                                    patients[patId].date = obs.effectiveDateTime?.substring(0, 10) || "9999";
+                                    // 紀錄檢驗日期 (取最早)
+                                    const d = r.effectiveDateTime ? r.effectiveDateTime.substring(0, 10) : "9999";
+                                    if (!patients[patId].obsDate || d < patients[patId].obsDate) {
+                                        patients[patId].obsDate = d;
+                                    }
                                 }
                             }
                         }
                     });
                 }
 
-                // 4. 繪圖數據
-                const nodes = Object.values(patients).map(p => ({
+                // 4. 建立圖表數據
+                const patList = Object.values(patients).filter(p => p.period.start); // 過濾掉沒有住院時間的人
+                const nodes = patList.map(p => ({
                     data: {
                         id: p.id,
-                        label: p.type === 'infected' ? `${p.name}\n${p.date}` : p.name,
+                        // 感染者顯示日期，接觸者不顯示
+                        label: p.type === 'infected' ? `${p.name}\n${p.obsDate}` : p.name,
                         type: p.type,
                         isRoot: p.id === rootId
                     }
                 }));
 
                 const edges = [];
-                const patList = Object.values(patients);
-                
-                // ★★★ 核心修正：連線邏輯 ★★★
+
+                // 5. 連線邏輯 (核心演算法)
                 for (let i = 0; i < patList.length; i++) {
                     for (let j = i + 1; j < patList.length; j++) {
-                        const a = patList[i];
-                        const b = patList[j];
+                        const p1 = patList[i];
+                        const p2 = patList[j];
 
-                        // 情境 1: 紅 <-> 紅 (兩者皆感染) -> 畫箭頭
-                        if (a.type === 'infected' && b.type === 'infected') {
-                            if (a.date < b.date) edges.push({ data: { source: a.id, target: b.id, type: 'arrow' } });
-                            else if (b.date < a.date) edges.push({ data: { source: b.id, target: a.id, type: 'arrow' } });
-                            else edges.push({ data: { source: a.id, target: b.id, type: 'dashed' } }); // 同一天
-                        } 
-                        // 情境 2: 紅 <-> 藍 (僅一方感染) -> 畫虛線 (從紅連到藍)
-                        else if (a.type === 'infected' && b.type === 'contact') {
-                            edges.push({ data: { source: a.id, target: b.id, type: 'dashed' } });
+                        // 判定時間重疊 (Time Overlap)
+                        // 公式: (StartA <= EndB) and (EndA >= StartB)
+                        const isOverlap = (p1.period.start <= p2.period.end) && (p1.period.end >= p2.period.start);
+
+                        if (!isOverlap) continue; // 沒有時間重疊，直接跳過，不算接觸
+
+                        // 情境 A: 雙方皆感染 (紅 <-> 紅) => 實線箭頭
+                        if (p1.type === 'infected' && p2.type === 'infected') {
+                            if (p1.obsDate < p2.obsDate) {
+                                edges.push({ data: { source: p1.id, target: p2.id, type: 'transmit' } });
+                            } else if (p2.obsDate < p1.obsDate) {
+                                edges.push({ data: { source: p2.id, target: p1.id, type: 'transmit' } });
+                            } else {
+                                edges.push({ data: { source: p1.id, target: p2.id, type: 'concurrent' } }); // 同日發現
+                            }
                         }
-                        else if (a.type === 'contact' && b.type === 'infected') {
-                            edges.push({ data: { source: b.id, target: a.id, type: 'dashed' } });
+                        // 情境 B: 一紅一藍 (感染 -> 接觸) => 虛線
+                        else if (p1.type === 'infected' && p2.type === 'contact') {
+                            edges.push({ data: { source: p1.id, target: p2.id, type: 'contact' } });
                         }
-                        // 情境 3: 藍 <-> 藍 (皆未感染) -> 【不畫線】
-                        else {
-                            // Do nothing
+                        else if (p2.type === 'infected' && p1.type === 'contact') {
+                            edges.push({ data: { source: p2.id, target: p1.id, type: 'contact' } });
                         }
+                        // 情境 C: 藍 <-> 藍 => 不連線 (依您要求)
                     }
                 }
 
-                status.textContent = `完成：${nodes.length} 人 (感染 ${nodes.filter(n=>n.data.type==='infected').length} 人)`;
-                renderCy(nodes, edges);
+                status.textContent = `分析完成：共 ${nodes.length} 人，感染 ${nodes.filter(n=>n.data.type==='infected').length} 人`;
+                renderGraph(nodes, edges);
 
             } catch (err) {
                 console.error(err);
@@ -147,24 +229,91 @@
             }
         }
 
-        function renderCy(nodes, edges) {
-            cytoscape({
+        function renderGraph(nodes, edges) {
+            cy = cytoscape({
                 container: document.getElementById('cy'),
                 elements: { nodes, edges },
                 style: [
-                    { selector: 'node', style: { 'label': 'data(label)', 'text-wrap': 'wrap', 'text-valign': 'center', 'text-halign': 'center', 'color': '#fff' } },
-                    // 紅色圓形
-                    { selector: 'node[type="infected"]', style: { 'shape': 'ellipse', 'background-color': '#e74c3c', 'width': 70, 'height': 70 } },
-                    // 藍色方形
-                    { selector: 'node[type="contact"]', style: { 'shape': 'rectangle', 'background-color': '#3498db', 'width': 60, 'height': 60 } },
-                    // 核心病人加粗
-                    { selector: 'node[?isRoot]', style: { 'border-width': 4, 'border-color': '#f1c40f' } },
-                    // 箭頭 (傳播)
-                    { selector: 'edge[type="arrow"]', style: { 'width': 3, 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' } },
-                    // 虛線 (接觸)
-                    { selector: 'edge[type="dashed"]', style: { 'width': 2, 'line-color': '#95a5a6', 'line-style': 'dashed', 'curve-style': 'bezier' } }
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(label)',
+                            'text-wrap': 'wrap',
+                            'text-valign': 'center',
+                            'text-halign': 'center',
+                            'font-size': '12px',
+                            'font-weight': 'bold',
+                            'color': '#000000', // ★★★ 修正：字體全黑 ★★★
+                            'border-width': 2,
+                            'border-color': '#333'
+                        }
+                    },
+                    {
+                        selector: 'node[type="infected"]',
+                        style: { 'shape': 'ellipse', 'background-color': '#e74c3c', 'width': 80, 'height': 80 }
+                    },
+                    {
+                        selector: 'node[type="contact"]',
+                        style: { 'shape': 'rectangle', 'background-color': '#3498db', 'width': 70, 'height': 70 }
+                    },
+                    {
+                        selector: 'node[?isRoot]', // 核心病人加粗黃框
+                        style: { 'border-width': 5, 'border-color': '#f1c40f' }
+                    },
+                    {
+                        selector: 'edge[type="transmit"]',
+                        style: { 'width': 4, 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' }
+                    },
+                    {
+                        selector: 'edge[type="contact"]',
+                        style: { 'width': 2, 'line-color': '#95a5a6', 'line-style': 'dashed', 'curve-style': 'bezier' }
+                    },
+                    {
+                        selector: 'edge[type="concurrent"]',
+                        style: { 'width': 4, 'line-color': '#e74c3c', 'line-style': 'dashed', 'curve-style': 'bezier' }
+                    },
+                    // ★★★ 互動樣式：被選中時 ★★★
+                    {
+                        selector: '.highlight',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#000',
+                            'font-size': '14px',
+                            'z-index': 999
+                        }
+                    },
+                    {
+                        selector: '.faded', // 未選中變暗
+                        style: {
+                            'opacity': 0.2,
+                            'label': '' // 隱藏文字讓畫面更乾淨
+                        }
+                    },
+                    {
+                        selector: 'edge.highlight',
+                        style: { 'width': 6 }
+                    }
                 ],
-                layout: { name: 'cose', animate: true, padding: 50, nodeRepulsion: 10000 }
+                layout: { name: 'cose', animate: true, padding: 50, componentSpacing: 80 }
+            });
+
+            // ★★★ 點擊互動邏輯 (Click Interaction) ★★★
+            cy.on('tap', function(e) {
+                if(e.target === cy){
+                    // 點擊空白處，重置
+                    cy.elements().removeClass('faded highlight');
+                } else {
+                    const node = e.target;
+                    // 先把所有人變暗
+                    cy.elements().addClass('faded');
+                    
+                    // 只有「這個人」+「連出去的線」+「連到的人」亮起來
+                    const connectedEdges = node.outgoers('edge'); // 只抓連出去的線? 還是所有相關? 根據需求通常是所有相關
+                    // 修正：顯示所有與此節點直接相連的關係 (雙向)
+                    const neighborhood = node.neighborhood().add(node);
+                    
+                    neighborhood.removeClass('faded').addClass('highlight');
+                }
             });
         }
     </script>
