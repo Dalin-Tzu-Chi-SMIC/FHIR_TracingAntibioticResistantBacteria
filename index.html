@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>抗藥菌地圖 (感染源鎖定版)</title>
+    <title>抗藥菌地圖</title>
     <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
     <script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
     <style>
@@ -22,11 +22,11 @@
 </head>
 <body>
     <div class="container">
-        <h1>抗藥菌地圖傳播鏈 (Infection-Focus)</h1>
+        <h1>抗藥菌地圖 (Multi-Event Analysis)</h1>
         
         <div class="controls">
             <label>病人 ID：</label>
-            <input type="text" id="root-id" placeholder="輸入 ID (例如: 670667)" style="width: 150px;">
+            <input type="text" id="root-id" placeholder="測試ID:670667" style="width: 150px;">
             
             <label>目標菌種：</label>
             <select id="organism">
@@ -78,14 +78,15 @@
             let pageCount = 0;
             const statusSpan = document.getElementById("status");
             
-            statusSpan.textContent = `📥 下載第 1 頁...`;
+            // 下載第一頁
             let response = await client.request(query, { flat: false });
             if (response.entry) response.entry.forEach(e => allResources.push(e.resource));
 
+            // 檢查 Next Link
             let nextLink = response.link?.find(l => l.relation === "next")?.url;
             while (nextLink && pageCount < maxPages) {
                 pageCount++;
-                statusSpan.textContent = `📥 下載第 ${pageCount + 1} 頁 (累積 ${allResources.length} 筆)...`;
+                statusSpan.textContent = `📥 下載分頁 ${pageCount + 1}... (目前 ${allResources.length} 筆)`;
                 response = await client.request(nextLink, { flat: false });
                 if (response.entry) response.entry.forEach(e => allResources.push(e.resource));
                 nextLink = response.link?.find(l => l.relation === "next")?.url;
@@ -101,91 +102,107 @@
 
             if (!rootId) { alert("請輸入病人 ID"); return; }
             btn.disabled = true;
-            status.textContent = "🔍 1/3 追蹤感染源頭...";
+            status.textContent = "🔍 1/3 搜尋所有感染史...";
 
             try {
-                // 1. 【關鍵修正】先找檢驗報告，確認是哪一次住院感染的
-                const obsQuery = `Observation?subject=${rootId}&_sort=-date`; 
+                // 1. 抓取該病人「所有」的 Observation (不只最新一筆)
+                const obsQuery = `Observation?subject=${rootId}`;
                 const obsBundle = await fhirClient.request(obsQuery, { flat: false });
                 
-                let targetEncId = null; // 這是關鍵住院的 ID (例如 enc-670667-test)
-
+                const targetEncIds = new Set(); // 收集所有感染相關的 Encounter ID
+                
                 if (obsBundle.entry) {
-                    // 篩選符合菌種的報告
-                    const targetObs = obsBundle.entry.find(e => {
+                    obsBundle.entry.forEach(e => {
                         const r = e.resource;
                         const raw = JSON.stringify(r).toLowerCase();
-                        if (orgSelect === "ALL") return true;
-                        const keywords = BUG_KEYWORDS[orgSelect];
-                        return keywords && keywords.every(k => raw.includes(k));
+                        
+                        // 檢查菌種
+                        let isTarget = false;
+                        if (orgSelect === "ALL") isTarget = true;
+                        else {
+                            const keywords = BUG_KEYWORDS[orgSelect];
+                            if (keywords && keywords.every(k => raw.includes(k))) isTarget = true;
+                        }
+
+                        if (isTarget && r.encounter?.reference) {
+                            // ★ 收集所有感染的 Encounter ID (去前綴)
+                            targetEncIds.add(r.encounter.reference.split("/").pop());
+                        }
                     });
+                }
 
-                    if (targetObs && targetObs.resource.encounter) {
-                        // 取得 Reference，例如 "Encounter/enc-670667-test"
-                        // ★重點：用 split 取出純 ID
-                        targetEncId = targetObs.resource.encounter.reference.split("/").pop();
+                if (targetEncIds.size === 0) throw new Error("找不到該病人的目標菌種報告，或報告未連結住院紀錄。");
+
+                // 2. 針對每一個感染 Encounter，找出它的 Location
+                status.textContent = `🔍 2/3 分析 ${targetEncIds.size} 次感染住院事件...`;
+                const locationIds = new Set();
+
+                // 平行查詢所有 Encounter 的 Location
+                const encPromises = Array.from(targetEncIds).map(id => fhirClient.request(`Encounter/${id}`));
+                const encounters = await Promise.all(encPromises);
+
+                encounters.forEach(enc => {
+                    if (enc.location && enc.location.length > 0) {
+                        const locId = enc.location[0].location.reference.split("/").pop();
+                        locationIds.add(locId);
                     }
+                });
+
+                if (locationIds.size === 0) throw new Error("相關住院紀錄沒有登記 Location (病房)");
+
+                console.log(`✅ 鎖定病房清單: ${Array.from(locationIds).join(", ")}`);
+
+                // 3. 掃描「所有相關病房」的接觸者
+                // 這是為了同時把 7A (舊) 和 8A (新) 的人都抓出來
+                let allContactResources = [];
+                
+                for (let locId of locationIds) {
+                    status.textContent = `🔍 掃描病房 ${locId} 資料...`;
+                    // 針對該病房抓取所有資料 (含翻頁)
+                    const query = `Encounter?location=${locId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=200`;
+                    const resources = await loadAllResources(fhirClient, query, 10);
+                    allContactResources = allContactResources.concat(resources);
                 }
 
-                if (!targetEncId) throw new Error("找不到該病人的目標菌種報告，或報告未連結住院紀錄。");
+                console.log(`📦 資料下載完畢: 共 ${allContactResources.length} 筆`);
 
-                // 2. 抓取該次住院紀錄 (Encounter)，確認 Location
-                // ★重點：直接抓 ID，不透過 search，保證抓到對的那筆
-                const targetEncounter = await fhirClient.request(`Encounter/${targetEncId}`);
-                
-                if (!targetEncounter.location || targetEncounter.location.length === 0) {
-                    throw new Error("這筆住院紀錄沒有登記 Location (病房)");
-                }
-
-                const targetLocId = targetEncounter.location[0].location.reference.split("/").pop();
-                console.log(`✅ 成功鎖定感染事件 ID: ${targetEncId}, 病房 ID: ${targetLocId}`);
-
-                // 3. 掃描該病房所有接觸者 (含翻頁)
-                status.textContent = `🔍 2/3 掃描病房 ${targetLocId} 接觸者...`;
-                const query = `Encounter?location=${targetLocId}&_include=Encounter:subject&_revinclude=Observation:encounter&_count=200`; // 這裡不用 sort date 了，直接全抓
-                
-                const resources = await loadAllResources(fhirClient, query, 20);
-                console.log(`📦 下載資料完畢: ${resources.length} 筆`);
-
-                // 4. 解析與繪圖
+                // 4. 解析資料 (與之前邏輯相同，但資料源更完整)
                 status.textContent = "🔍 3/3 計算傳播路徑...";
                 
                 const nodesMap = {};
                 const patientEncounters = {};
                 
-                // 將「關鍵感染事件」強制加入 (怕分頁沒抓到自己)
-                // 雖然上面 loadAllResources 應該會抓到，但保險起見
-                // 我們主要依賴 resources 裡的資料
+                // 加入已知感染事件 ID 確保不漏
+                const infectedEncounters = new Set(targetEncIds);
 
-                // A. 建立索引 (Patient & Encounter)
-                resources.forEach(r => {
+                // A. 建立索引
+                allContactResources.forEach(r => {
                     if (r.resourceType === "Patient") {
                         const name = r.name?.[0]?.text || "Unknown";
                         if(!nodesMap[r.id]) {
-                            nodesMap[r.id] = { 
-                                id: r.id, name: name, type: 'contact', category: 'patient', obsDate: null, rank: null 
-                            };
+                            nodesMap[r.id] = { id: r.id, name: name, type: 'contact', category: 'patient', obsDate: null, rank: null };
                         }
                     }
                     if (r.resourceType === "Encounter") {
                         const patId = r.subject?.reference?.split("/").pop();
                         
-                        // 記錄每一筆 Encounter
                         if (!patientEncounters[patId]) patientEncounters[patId] = [];
-                        patientEncounters[patId].push(r);
+                        patientEncounters[patId].push(r); // 存入陣列
 
-                        // 如果這筆 Encounter 剛好是我們的目標住院，更新該病人的主要顯示時間
-                        if (r.id === targetEncId && nodesMap[patId]) {
-                             nodesMap[patId].period = {
-                                start: new Date(r.period.start).getTime(),
-                                end: r.period.end ? new Date(r.period.end).getTime() : 9999999999999
-                            };
+                        // 如果這筆是已知的感染住院，強制設定為該病人的主要 period (方便畫圖判定)
+                        if (targetEncIds.has(r.id) && nodesMap[patId]) {
+                             if(r.period) {
+                                nodesMap[patId].period = {
+                                    start: new Date(r.period.start).getTime(),
+                                    end: r.period.end ? new Date(r.period.end).getTime() : 9999999999999
+                                };
+                             }
                         }
                     }
                 });
 
-                // B. 標記感染者 (Observation)
-                resources.forEach(r => {
+                // B. 標記感染者 (掃描下載回來的 Observations)
+                allContactResources.forEach(r => {
                     if (r.resourceType === "Observation") {
                         const raw = JSON.stringify(r).toLowerCase();
                         let isTarget = false;
@@ -197,84 +214,102 @@
 
                         if (isTarget) {
                             const patId = r.subject?.reference?.split("/").pop();
+                            const obsEncRef = r.encounter?.reference;
+                            
                             if (patId && nodesMap[patId]) {
                                 nodesMap[patId].type = 'infected';
                                 const d = r.effectiveDateTime ? r.effectiveDateTime.substring(0, 10) : "9999";
                                 if (!nodesMap[patId].obsDate || d < nodesMap[patId].obsDate) nodesMap[patId].obsDate = d;
                             }
+                            if (obsEncRef) infectedEncounters.add(obsEncRef.split("/").pop());
                         }
                     }
                 });
 
-                // C. 排序 No.1, No.2
+                // C. 排序
                 const infectedList = Object.values(nodesMap).filter(n => n.type === 'infected')
                     .sort((a, b) => (a.obsDate < b.obsDate ? -1 : 1));
                 infectedList.forEach((node, index) => { node.rank = index + 1; });
 
-                // 5. 連線邏輯 (核心修正：直接針對目標 Encounter ID 找人)
+                // 5. 連線邏輯
                 const edges = [];
                 const activeNodes = new Set();
 
-                // 我們要找的是：所有「在目標病房」且「與 targetEncId 時間重疊」或「參與 targetEncId」的人
-                
-                // 5-1. 先處理核心病人的接觸者 (醫護)
-                const coreEnc = patientEncounters[rootId]?.find(e => e.id === targetEncId); // 確保 ID 吻合
-                
-                if (coreEnc) {
-                    activeNodes.add(rootId); // 核心病人自己
-                    
-                    // 抓醫護人員
-                    if (coreEnc.participant) {
-                        coreEnc.participant.forEach(part => {
-                            if (part.individual && part.individual.reference) {
-                                const rawStaffId = part.individual.reference.split("/").pop();
-                                const staffId = "staff-" + rawStaffId;
-                                const staffName = part.individual.display || "醫護人員";
+                // 針對「每一個」感染事件，分別找接觸者
+                infectedEncounters.forEach(infEncId => {
+                    // 找出所有人的 Encounter 是否吻合此 ID (或時間重疊)
+                    Object.values(patientEncounters).flat().forEach(idxEnc => {
+                        
+                        // 情境1：醫護人員 (直接參與該次住院)
+                        if (idxEnc.id === infEncId) {
+                            const p1Id = idxEnc.subject?.reference?.split("/").pop();
+                            if(nodesMap[p1Id]) {
+                                activeNodes.add(p1Id); // 核心病人顯示
 
-                                if (!nodesMap[staffId]) {
-                                    nodesMap[staffId] = { id: staffId, name: staffName, type: 'contact', category: 'staff' };
-                                }
-                                edges.push({ data: { source: rootId, target: staffId, type: 'contact' } });
-                                activeNodes.add(staffId);
-                            }
-                        });
-                    }
+                                if (idxEnc.participant) {
+                                    idxEnc.participant.forEach(part => {
+                                        if (part.individual && part.individual.reference) {
+                                            const rawStaffId = part.individual.reference.split("/").pop();
+                                            const staffId = "staff-" + rawStaffId;
+                                            const staffName = part.individual.display || "醫護人員";
 
-                    // 5-2. 抓同房病友 (時間重疊)
-                    if (coreEnc.period) {
-                        const start = new Date(coreEnc.period.start).getTime();
-                        const end = coreEnc.period.end ? new Date(coreEnc.period.end).getTime() : 9999999999999;
-
-                        Object.values(patientEncounters).flat().forEach(otherEnc => {
-                            const p2Id = otherEnc.subject?.reference?.split("/").pop();
-                            if (rootId === p2Id) return; // 跳過自己
-
-                            const p2 = nodesMap[p2Id];
-                            if (!p2) return;
-
-                            if (otherEnc.period) {
-                                const oStart = new Date(otherEnc.period.start).getTime();
-                                const oEnd = otherEnc.period.end ? new Date(otherEnc.period.end).getTime() : 9999999999999;
-                                if (start <= oEnd && end >= oStart) {
-                                    // 判斷連線類型
-                                    if (p2.type === 'infected') {
-                                        if (nodesMap[rootId].obsDate < p2.obsDate) edges.push({ data: { source: rootId, target: p2Id, type: 'transmit' } });
-                                        else if (p2.obsDate < nodesMap[rootId].obsDate) edges.push({ data: { source: p2Id, target: rootId, type: 'transmit' } });
-                                        else edges.push({ data: { source: rootId, target: p2Id, type: 'concurrent' } });
-                                    } else {
-                                        edges.push({ data: { source: rootId, target: p2Id, type: 'contact' } });
-                                    }
-                                    activeNodes.add(p2Id);
+                                            if (!nodesMap[staffId]) {
+                                                nodesMap[staffId] = { id: staffId, name: staffName, type: 'contact', category: 'staff' };
+                                            }
+                                            
+                                            // 病人 -> 醫護
+                                            edges.push({ data: { source: p1Id, target: staffId, type: 'contact' } });
+                                            activeNodes.add(staffId);
+                                        }
+                                    });
                                 }
                             }
-                        });
-                    }
-                }
-                
-                // ★ 這裡為了完整性，若還有其他感染者 (p2) 也是在這次掃描中被抓到，
-                // 他們自己的接觸者 (醫護) 也應該要被畫出來
-                // 簡化起見，我們先保證核心病人的接觸者一定有出來。
-                
+                        }
+
+                        // 情境2：室友 (時間重疊)
+                        // 我們需要先找到這次感染住院的詳細資訊 (時間)
+                        // 但 patientEncounters 是散的，我們用 infEncId 去找它的主人和時間
+                        let sourceEnc = null;
+                        for(let pid in patientEncounters) {
+                            const found = patientEncounters[pid].find(e => e.id === infEncId);
+                            if(found) { sourceEnc = found; break; }
+                        }
+
+                        if(sourceEnc && sourceEnc.period) {
+                             const p1Id = sourceEnc.subject?.reference?.split("/").pop();
+                             const start = new Date(sourceEnc.period.start).getTime();
+                             const end = sourceEnc.period.end ? new Date(sourceEnc.period.end).getTime() : 9999999999999;
+                             
+                             // idxEnc 是「其他人」的住院
+                             if(idxEnc.id !== infEncId) { 
+                                 const p2Id = idxEnc.subject?.reference?.split("/").pop();
+                                 if(p1Id !== p2Id && nodesMap[p2Id] && idxEnc.period) {
+                                     // 檢查是否同病房 (已經在 location 迴圈篩過了，這裡主要是確認時間)
+                                     // 嚴謹一點：檢查 idxEnc 的 Location 是否等於 sourceEnc 的 Location
+                                     // 簡化：假設同一次下載的都是同病房
+                                     
+                                     const oStart = new Date(idxEnc.period.start).getTime();
+                                     const oEnd = idxEnc.period.end ? new Date(idxEnc.period.end).getTime() : 9999999999999;
+                                     
+                                     if (start <= oEnd && end >= oStart) {
+                                         // 畫線
+                                         if (nodesMap[p2Id].type === 'infected') {
+                                             const d1 = nodesMap[p1Id].obsDate || "9999";
+                                             const d2 = nodesMap[p2Id].obsDate || "9999";
+                                             if (d1 < d2) edges.push({ data: { source: p1Id, target: p2Id, type: 'transmit' } });
+                                             else if (d2 < d1) edges.push({ data: { source: p2Id, target: p1Id, type: 'transmit' } });
+                                             else edges.push({ data: { source: p1Id, target: p2Id, type: 'concurrent' } });
+                                         } else {
+                                             edges.push({ data: { source: p1Id, target: p2Id, type: 'contact' } });
+                                         }
+                                         activeNodes.add(p1Id);
+                                         activeNodes.add(p2Id);
+                                     }
+                                 }
+                             }
+                        }
+                    });
+                });
 
                 // 6. 去重與繪圖
                 const uniqueEdges = [];
